@@ -105,7 +105,12 @@ export const getSalesOrders = async (req, res) => {
 }
 
 export const deleteSalesOrder = async (req, res) => {
-  const { SalesOrderNumber } = req.params
+  // const { SalesOrderNumber } = req.params
+  const SalesOrderNumber =
+    req.params.SalesOrderNumber ||
+    req.params.salesOrderNumber ||
+    req.body.SalesOrderNumber ||
+    req.body.salesOrderNumber
 
   try {
     // Delete from order_lines first (CASCADE would do this automatically if set)
