@@ -1,4 +1,4 @@
-import supabase from '../config/supabase.js'
+import database from '../config/supabase.js'
 import { mapOrderFields } from '../helpers/sap-helpers.js'
 import { Response } from '../utils/classes.js'
 
@@ -19,7 +19,7 @@ export const upsertSalesOrder = async (req, res) => {
   try {
     // 1. Upsert sales_orders
 
-    const { error: orderError } = await supabase.from('sales_orders').upsert(
+    const { error: orderError } = await database.from('sales_orders').upsert(
       [
         {
           sales_order_number: SalesOrderNumber,
@@ -52,7 +52,7 @@ export const upsertSalesOrder = async (req, res) => {
         send_to_production: line.sendToProduction ?? line.SendToProduction,
       }))
 
-      const { error: lineError } = await supabase
+      const { error: lineError } = await database
         .from('order_lines')
         .upsert(formattedLines, { onConflict: 'id' })
 
@@ -81,7 +81,7 @@ export const upsertSalesOrder = async (req, res) => {
 
 export const getSalesOrders = async (req, res) => {
   try {
-    const { data, error } = await supabase.from('sales_orders').select(`
+    const { data, error } = await database.from('sales_orders').select(`
         *,
         order_lines (
           id,
@@ -109,13 +109,13 @@ export const deleteSalesOrder = async (req, res) => {
 
   try {
     // Delete from order_lines first (CASCADE would do this automatically if set)
-    await supabase
+    await database
       .from('order_lines')
       .delete()
       .eq('sales_order_number', SalesOrderNumber)
 
     // Delete sales order
-    const { error } = await supabase
+    const { error } = await database
       .from('sales_orders')
       .delete()
       .eq('sales_order_number', SalesOrderNumber)
