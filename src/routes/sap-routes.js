@@ -1,16 +1,14 @@
 import express from 'express'
-import {
-  deleteSalesOrder,
-  getSalesOrders,
-  upsertSalesOrder,
-} from '../controllers/sap-controller.js'
+import { upsertSalesOrder } from '../controllers/sap-controller.js'
+import { auth } from '../controllers/auth-controller.js'
+import { apiClientAuth } from '../middleware/api-client-auth.js'
 
 const router = express.Router()
 
-// routes
-router.post('/orders', upsertSalesOrder)
-router.get('/orders', getSalesOrders)
-router.put('/orders/:salesOrderNumber', upsertSalesOrder)
-router.delete('/orders/:salesOrderNumber', deleteSalesOrder)
+// --------------------//
+// SAP endpoints
+// --------------------//
+router.post('/login', auth)
+router.post('/orders', apiClientAuth, upsertSalesOrder)
 
 export default router

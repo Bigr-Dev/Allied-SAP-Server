@@ -2,28 +2,94 @@ import database from '../config/supabase.js'
 import { mapOrderFields } from '../helpers/sap-helpers.js'
 import { Response } from '../utils/classes.js'
 
-// notes from brian
-// from object check DocDtatus, if O then open else if C then closed
-//send_to_planning||SendToDispatch if U||Y then save else do not save
-// check urProd in lines .. if D it means it has been deleted,
-// in lines SendToProduction if D it means deleted if Y and N I ignore
-
 export const upsertSalesOrder = async (req, res) => {
-  const { orderLines, ...rest } = req.body
+  const {
+    orderLines = [],
+    DocStatus,
+    SendToDispatch,
+    sendToPlanning,
+  } = req.body
+
   const SalesOrderNumber =
     req.params.SalesOrderNumber ||
     req.params.salesOrderNumber ||
     req.body.SalesOrderNumber ||
     req.body.salesOrderNumber
 
-  try {
-    // 1. Upsert sales_orders
+  if (!SalesOrderNumber) {
+    return res.status(400).send(new Response(400, 'Missing SalesOrderNumber'))
+  }
 
+  try {
+    // 1. If DocStatus is "C" (closed), delete from DB and exit
+    if (DocStatus === 'C') {
+      const { error: delLineErr } = await database
+        .from('order_lines')
+        .delete()
+        .eq('sales_order_number', SalesOrderNumber)
+
+      const { error: delOrderErr } = await database
+        .from('sales_orders')
+        .delete()
+        .eq('sales_order_number', SalesOrderNumber)
+
+      if (delOrderErr || delLineErr) {
+        return res
+          .status(500)
+          .send(
+            new Response(
+              500,
+              'Delete failed due to DocStatus=C',
+              delOrderErr?.message || delLineErr?.message
+            )
+          )
+      }
+
+      return res
+        .status(200)
+        .send(new Response(200, 'Deleted due to DocStatus=C'))
+    }
+
+    // 2. If sendToPlanning or SendToDispatch is NOT "Y" or "U", delete from DB and exit
+    if (
+      !['Y', 'U'].includes(SendToDispatch) &&
+      !['Y', 'U'].includes(sendToPlanning)
+    ) {
+      const { error: delLineErr } = await database
+        .from('order_lines')
+        .delete()
+        .eq('sales_order_number', SalesOrderNumber)
+
+      const { error: delOrderErr } = await database
+        .from('sales_orders')
+        .delete()
+        .eq('sales_order_number', SalesOrderNumber)
+
+      if (delOrderErr || delLineErr) {
+        return res
+          .status(500)
+          .send(
+            new Response(
+              500,
+              'Deleted due to invalid dispatch/planning',
+              delOrderErr?.message || delLineErr?.message
+            )
+          )
+      }
+
+      return res
+        .status(200)
+        .send(
+          new Response(200, 'Deleted due to SendToDispatch/Planning not Y/U')
+        )
+    }
+
+    // 3. Upsert sales order
     const { error: orderError } = await database.from('sales_orders').upsert(
       [
         {
           sales_order_number: SalesOrderNumber,
-          ...mapOrderFields(rest),
+          ...mapOrderFields(req.body),
         },
       ],
       {
@@ -37,10 +103,33 @@ export const upsertSalesOrder = async (req, res) => {
         .send(new Response(500, 'Order upsert failed', orderError.message))
     }
 
-    // 2. Upsert order_lines
-    if (Array.isArray(orderLines)) {
-      const formattedLines = orderLines.map((line) => ({
-        id: line.id ?? line.Id,
+    // 4. Process order lines
+    const linesToUpsert = []
+
+    for (const line of orderLines) {
+      const id = line.id ?? line.Id
+      const urProd = line.urProd ?? line.UrProd
+      const sendToProduction = line.sendToProduction ?? line.SendToProduction
+
+      if (!id) continue
+
+      // Delete line if marked deleted
+      if (urProd === 'D' || sendToProduction === 'D') {
+        const { error: delLineError } = await database
+          .from('order_lines')
+          .delete()
+          .eq('id', id)
+
+        if (delLineError) {
+          console.error(`Failed to delete line ${id}:`, delLineError.message)
+        }
+
+        continue // Skip upserting this deleted line
+      }
+
+      // Add to upsert list
+      linesToUpsert.push({
+        id,
         sales_order_number: SalesOrderNumber,
         description: line.description ?? line.Description,
         lip_channel_quantity:
@@ -48,13 +137,16 @@ export const upsertSalesOrder = async (req, res) => {
         quantity: line.quantity ?? line.Quantity,
         weight: line.weight ?? line.Weight,
         length: line.length ?? line.Length,
-        ur_prod: line.urProd ?? line.UrProd,
-        send_to_production: line.sendToProduction ?? line.SendToProduction,
-      }))
+        ur_prod: urProd,
+        send_to_production: sendToProduction,
+      })
+    }
 
+    // 5. Upsert remaining lines
+    if (linesToUpsert.length > 0) {
       const { error: lineError } = await database
         .from('order_lines')
-        .upsert(formattedLines, { onConflict: 'id' })
+        .upsert(linesToUpsert, { onConflict: 'id' })
 
       if (lineError) {
         return res
@@ -75,6 +167,7 @@ export const upsertSalesOrder = async (req, res) => {
         )
       )
   } catch (err) {
+    console.error('Server error during upsert:', err)
     return res.status(500).send(new Response(500, 'Server Error', err.message))
   }
 }
@@ -136,3 +229,31 @@ export const deleteSalesOrder = async (req, res) => {
     return res.status(500).send(new Response(500, 'Server Error', err.message))
   }
 }
+
+// updated get to be implimented with pagination later
+// export const getSalesOrders = async (req, res) => {
+//   const limit = parseInt(req.query.limit) || 50  // default 50 records
+//   const page = parseInt(req.query.page) || 1     // default to page 1
+//   const offset = (page - 1) * limit
+
+//   try {
+//     const { data, error } = await database
+//       .from('sales_orders')
+//       .select('*')
+//       .order('created_at', { ascending: false }) // optional sorting
+//       .range(offset, offset + limit - 1)
+
+//     if (error) {
+//       return res.status(500).json({ error: error.message })
+//     }
+
+//     return res.status(200).json({
+//       page,
+//       limit,
+//       count: data.length,
+//       results: data,
+//     })
+//   } catch (err) {
+//     return res.status(500).json({ error: 'Server error', details: err.message })
+//   }
+// }
