@@ -4,7 +4,7 @@ import { Response } from '../utils/classes.js'
 
 export const upsertSalesOrder = async (req, res) => {
   const {
-    orderLines = [],
+    OrderLines = [],
     DocStatus,
     SendToDispatch,
     sendToPlanning,
@@ -106,7 +106,7 @@ export const upsertSalesOrder = async (req, res) => {
     // 4. Process order lines
     const linesToUpsert = []
 
-    for (const line of orderLines) {
+    for (const line of OrderLines) {
       const id = line.id ?? line.Id
       const urProd = line.urProd ?? line.UrProd
       const sendToProduction = line.sendToProduction ?? line.SendToProduction
