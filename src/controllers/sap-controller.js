@@ -2,7 +2,6 @@ import database from '../config/supabase.js'
 import {
   findCustomerId,
   getOrCreateLoad,
-  getOrCreateStop,
   recomputeLoadTotals,
   resolveRoute,
   resolveStopForRoute,
@@ -13,6 +12,7 @@ import {
 import { mapOrderFields } from '../helpers/sap-helpers.js'
 import { Response } from '../utils/classes.js'
 import { buildLogFromReqRes, logApiEvent } from '../utils/db-logger.js'
+import { getOrCreateStop } from '../utils/load-stops.js'
 
 // const toNumber = (v) => (v == null || v === '' ? null : Number(v))
 export const upsertSalesOrder = async (req, res) => {
@@ -345,7 +345,16 @@ export const upsertSalesOrder = async (req, res) => {
     }
 
     // Allow a stop with minimal locality to avoid losing the order
-    const loadStopId = await getOrCreateStop(loadId, {
+    // const loadStopId = await getOrCreateStop(loadId, {
+    //   route_id: route.id,
+    //   suburb_name:
+    //     stop?.suburb_name ?? (orderRow?.sales_order_city || 'Unknown'),
+    //   city: stop?.city ?? orderRow?.sales_order_city ?? '',
+    //   province: stop?.province ?? orderRow?.state ?? '',
+    //   postal_code: stop?.postal_code ?? orderRow?.sales_order_zip_code ?? '',
+    //   position: stop?.position ?? null,
+    // })
+    const loadStopId = await getOrCreateStop(database, loadId, {
       route_id: route.id,
       suburb_name:
         stop?.suburb_name ?? (orderRow?.sales_order_city || 'Unknown'),

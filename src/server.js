@@ -3,7 +3,6 @@ import dotenv from 'dotenv'
 import ip from 'ip'
 
 import cors from 'cors'
-import bodyParser from 'body-parser'
 import { limiter } from './middleware/rate-limiter.js'
 import logger from './config/logger.js'
 
@@ -19,13 +18,21 @@ const PORT = process.env.PORT || 8800
 
 // Middleware
 app.use(cors({ origin: '*' }))
-app.use(bodyParser.json())
-app.use(bodyParser.json({ limit: '25mb' }))
-app.use(bodyParser.urlencoded({ limit: '25mb', extended: true }))
 
-// If you also use express.json elsewhere, set it too:
+// 🔧 single set of parsers with higher limits
 app.use(express.json({ limit: '25mb' }))
 app.use(express.urlencoded({ limit: '25mb', extended: true }))
+
+// ✅ lightweight health endpoint (no rate limit)
+app.get('/api/health', (req, res) => {
+  res.status(200).json({
+    ok: true,
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  })
+})
+
+// Apply rate limiter AFTER health
 app.use(limiter)
 
 // SAP routes
