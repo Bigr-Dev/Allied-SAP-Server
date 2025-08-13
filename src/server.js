@@ -20,7 +20,12 @@ const PORT = process.env.PORT || 8800
 // Middleware
 app.use(cors({ origin: '*' }))
 app.use(bodyParser.json())
-app.use(bodyParser.urlencoded({ extended: true }))
+app.use(bodyParser.json({ limit: '25mb' }))
+app.use(bodyParser.urlencoded({ limit: '25mb', extended: true }))
+
+// If you also use express.json elsewhere, set it too:
+app.use(express.json({ limit: '25mb' }))
+app.use(express.urlencoded({ limit: '25mb', extended: true }))
 app.use(limiter)
 
 // SAP routes
