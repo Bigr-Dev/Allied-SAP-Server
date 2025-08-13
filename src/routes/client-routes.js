@@ -41,6 +41,12 @@ import {
   updateVehicle,
   deleteVehicle,
 } from '../controllers/vehicles-controller.js'
+import { getLoads } from '../controllers/loads-controller.js'
+import {
+  loginWithSupabase,
+  logout,
+  refreshSupabaseSession,
+} from '../controllers/client-auth-controller.js'
 
 // --------------------//
 // Client endpoints
@@ -50,7 +56,11 @@ import {
 const router = express.Router()
 
 // login
-router.post('/login', auth)
+router.post('/login', loginWithSupabase)
+router.post('/refresh', refreshSupabaseSession)
+router.post('logout,', logout) // Assuming you have a logout function
+
+// router.post('/login', auth)
 
 // sap data
 router.get('/orders', apiClientAuth, getSalesOrders)
@@ -89,5 +99,8 @@ router.get('/vehicles/:id', apiClientAuth, getVehicleById)
 router.post('/vehicles/', apiClientAuth, createVehicle)
 router.put('/vehicles/:id', apiClientAuth, updateVehicle)
 router.delete('/vehicles/:id', apiClientAuth, deleteVehicle)
+
+// loads
+router.get('/loads', apiClientAuth, getLoads)
 
 export default router

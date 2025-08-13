@@ -9,7 +9,7 @@
   },
   "license": "MIT",
   "dependencies": {
-    "@supabase/supabase-js": "^2.53.0",
+    "@supabase/supabase-js": "^2.54.0",
     "bcrypt": "^6.0.0",
     "body-parser": "^2.2.0",
     "cors": "^2.8.5",
@@ -17,7 +17,9 @@
     "express": "^5.1.0",
     "express-rate-limit": "^8.0.1",
     "ip": "^2.0.1",
+    "jose": "^6.0.12",
     "jsonwebtoken": "^9.0.2",
+    "uuid": "^11.1.0",
     "winston": "^3.17.0",
     "winston-daily-rotate-file": "^5.0.0"
   },

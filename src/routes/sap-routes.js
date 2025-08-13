@@ -1,7 +1,7 @@
 import express from 'express'
 import { upsertSalesOrder } from '../controllers/sap-controller.js'
 import { auth } from '../controllers/auth-controller.js'
-import { apiClientAuth } from '../middleware/api-client-auth.js'
+import { apiSapAuth } from '../middleware/api-sap-auth.js'
 
 const router = express.Router()
 
@@ -9,6 +9,6 @@ const router = express.Router()
 // SAP endpoints
 // --------------------//
 router.post('/login', auth)
-router.post('/orders', apiClientAuth, upsertSalesOrder)
+router.post('/orders', apiSapAuth, upsertSalesOrder)
 
 export default router

@@ -9,10 +9,12 @@ import logger from './config/logger.js'
 
 import sapRouter from './routes/sap-routes.js'
 import clientRouter from './routes/client-routes.js'
+import { correlationId } from './middleware/correlation.js'
 
 // initialize environment variables
 dotenv.config()
 const app = express()
+app.use(correlationId())
 const PORT = process.env.PORT || 8800
 
 // Middleware

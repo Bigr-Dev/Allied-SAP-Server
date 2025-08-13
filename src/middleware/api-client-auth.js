@@ -1,23 +1,26 @@
-import jwt from 'jsonwebtoken'
+import database from '../config/supabase.js'
 
-export const apiClientAuth = async (req, res, next) => {
-  const authHeader = req.headers['authorization']
-
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).send('Unauthorized: Invalid credentials')
-  }
-
-  const token = authHeader.split(' ')[1].trim()
-
+export async function apiClientAuth(req, res, next) {
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SAP_SECRET.trim())
-
-    req.client = { username: decoded.sub }
-    next()
-  } catch (err) {
-    if (err.name === 'TokenExpiredError') {
-      return res.status(401).send('Token expired')
+    const authHeader = req.headers.authorization || ''
+    if (!authHeader.startsWith('Bearer ')) {
+      return res
+        .status(401)
+        .json({ error: 'Unauthorized: Missing Bearer token' })
     }
-    return res.status(401).send('Invalid token')
+    const token = authHeader.slice(7).trim()
+    const { data, error } = await database.auth.getUser(token)
+    if (error || !data?.user) {
+      return res
+        .status(401)
+        .json({ error: 'Unauthorized: Invalid or expired token' })
+    }
+    req.user = { ...data.user, sub: data.user.id }
+    return next()
+  } catch (e) {
+    console.error('[apiClientAuth] Service verify failed:', e.message)
+    return res
+      .status(401)
+      .json({ error: 'Unauthorized: Invalid or expired token' })
   }
 }

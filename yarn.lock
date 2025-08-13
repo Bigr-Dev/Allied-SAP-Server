@@ -51,15 +51,14 @@
   dependencies:
     "@supabase/node-fetch" "^2.6.14"
 
-"@supabase/realtime-js@2.11.15":
-  version "2.11.15"
-  resolved "https://registry.yarnpkg.com/@supabase/realtime-js/-/realtime-js-2.11.15.tgz#74e520eee0dda51fdc83902abaaefacad6f3f0a9"
-  integrity sha512-HQKRnwAqdVqJW/P9TjKVK+/ETpW4yQ8tyDPPtRMKOH4Uh3vQD74vmj353CYs8+YwVBKubeUOOEpI9CT8mT4obw==
+"@supabase/realtime-js@2.15.0":
+  version "2.15.0"
+  resolved "https://registry.yarnpkg.com/@supabase/realtime-js/-/realtime-js-2.15.0.tgz#ed0c2ad3ab2e76c1d25bc69f75c3fffa50741aec"
+  integrity sha512-SEIWApsxyoAe68WU2/5PCCuBwa11LL4Bb8K3r2FHCt3ROpaTthmDiWEhnLMGayP05N4QeYrMk0kyTZOwid/Hjw==
   dependencies:
     "@supabase/node-fetch" "^2.6.13"
     "@types/phoenix" "^1.6.6"
     "@types/ws" "^8.18.1"
-    isows "^1.0.7"
     ws "^8.18.2"
 
 "@supabase/storage-js@^2.10.4":
@@ -69,16 +68,16 @@
   dependencies:
     "@supabase/node-fetch" "^2.6.14"
 
-"@supabase/supabase-js@^2.53.0":
-  version "2.53.0"
-  resolved "https://registry.yarnpkg.com/@supabase/supabase-js/-/supabase-js-2.53.0.tgz#ccf1d97e66b47ae4d7e0c7982a5b02b45afb94df"
-  integrity sha512-Vg9sl0oFn55cCPaEOsDsRDbxOVccxRrK/cikjL1XbywHEOfyA5SOOEypidMvQLwgoAfnC2S4D9BQwJDcZs7/TQ==
+"@supabase/supabase-js@^2.54.0":
+  version "2.54.0"
+  resolved "https://registry.yarnpkg.com/@supabase/supabase-js/-/supabase-js-2.54.0.tgz#bb0005a869566f65fb1fbabe9478cf0abf2bcaa4"
+  integrity sha512-DLw83YwBfAaFiL3oWV26+sHRdeCGtxmIKccjh/Pndze3BWM4fZghzYKhk3ElOQU8Bluq4AkkCJ5bM5Szl/sfRg==
   dependencies:
     "@supabase/auth-js" "2.71.1"
     "@supabase/functions-js" "2.4.5"
     "@supabase/node-fetch" "2.6.15"
     "@supabase/postgrest-js" "1.19.4"
-    "@supabase/realtime-js" "2.11.15"
+    "@supabase/realtime-js" "2.15.0"
     "@supabase/storage-js" "^2.10.4"
 
 "@types/node@*":
@@ -597,10 +596,10 @@ is-stream@^2.0.0:
   resolved "https://registry.yarnpkg.com/is-stream/-/is-stream-2.0.1.tgz#fac1e3d53b97ad5a9d0ae9cef2389f5810a5c077"
   integrity sha512-hFoiJiTl63nn+kstHGBtewWSKnQLpyb155KHheA1l39uvtO9nWIop1p3udqPcUd/xbF1VLMO4n7OI6p7RbngDg==
 
-isows@^1.0.7:
-  version "1.0.7"
-  resolved "https://registry.yarnpkg.com/isows/-/isows-1.0.7.tgz#1c06400b7eed216fbba3bcbd68f12490fc342915"
-  integrity sha512-I1fSfDCZL5P0v33sVqeTDSpcstAg/N+wF5HS033mogOVIp4B+oHC7oOCsA3axAbBSGTJ8QubbNmnIRN/h8U7hg==
+jose@^6.0.12:
+  version "6.0.12"
+  resolved "https://registry.yarnpkg.com/jose/-/jose-6.0.12.tgz#56253d94d46bd784addc4bde3691c323552fe7e4"
+  integrity sha512-T8xypXs8CpmiIi78k0E+Lk7T2zlK4zDyg+o1CZ4AkOHgDg98ogdP2BeZ61lTFKFyoEwJ9RgAgN+SdM3iPgNonQ==
 
 jsonwebtoken@^9.0.2:
   version "9.0.2"
@@ -1075,6 +1074,11 @@ util-deprecate@^1.0.1:
   version "1.0.2"
   resolved "https://registry.yarnpkg.com/util-deprecate/-/util-deprecate-1.0.2.tgz#450d4dc9fa70de732762fbd2d4a28981419a0ccf"
   integrity sha512-EPD5q1uXyFxJpCrLnCc1nHnq3gOa6DZBocAIiI2TaSCA7VCJ1UJDMagCzIkXNsUYfD1daK//LTEQ8xiIbrHtcw==
+
+uuid@^11.1.0:
+  version "11.1.0"
+  resolved "https://registry.yarnpkg.com/uuid/-/uuid-11.1.0.tgz#9549028be1753bb934fc96e2bca09bb4105ae912"
+  integrity sha512-0/A9rDy9P7cJ+8w1c9WD9V//9Wj15Ce2MPz8Ri6032usz+NfePxx5AcN3bN+r6ZL6jEo066/yNYB3tn4pQEx+A==
 
 vary@^1, vary@^1.1.2:
   version "1.1.2"
