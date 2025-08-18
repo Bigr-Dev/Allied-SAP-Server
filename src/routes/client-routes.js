@@ -58,7 +58,7 @@ const router = express.Router()
 // login
 router.post('/login', loginWithSupabase)
 router.post('/refresh', refreshSupabaseSession)
-router.post('logout,', logout) // Assuming you have a logout function
+router.post('/logout,', logout)
 
 // router.post('/login', auth)
 
