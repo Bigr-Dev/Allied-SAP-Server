@@ -86,7 +86,7 @@ export const upsertSalesOrder = async (req, res) => {
         )
     }
 
-    // 2) Filter gate: require SendToDispatch or sendToPlanning to be Y/U
+    // 2) Filter gate: require SendToDispatch or sendToPlanning to be Y/U ... add 2 for second load
     const gateOk =
       ['Y', 'U'].includes(SendToDispatch) || ['Y', 'U'].includes(sendToPlanning)
 
