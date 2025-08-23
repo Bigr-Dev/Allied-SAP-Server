@@ -162,30 +162,124 @@
 //   }
 // }
 
+// import database from '../config/supabase.js'
+// import { Response } from '../utils/classes.js'
+
+// /**
+//  * GET /api/loads
+//  * Query params:
+//  *   - date: YYYY-MM-DD (optional)
+//  *   - route_id: uuid (optional)
+//  *   - route_name: string (optional; ILIKE filter)
+//  *   - status: planned|assigned|loaded|delivered|cancelled (optional)
+//  *   - includeItems: 'true' | 'false' (optional; default false)
+//  *   - page: number (optional; default 1)
+//  *   - limit: number (optional; default 50)
+//  */
+// export const getLoads = async (req, res) => {
+//   try {
+//     const {
+//       date,
+//       route_id,
+//       route_name,
+//       status,
+//       includeItems = 'false',
+//       page = '1',
+//       limit = '200',
+//     } = req.query
+
+//     const pageNum = Math.max(parseInt(page, 10) || 1, 1)
+//     const limitNum = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200)
+//     const from = (pageNum - 1) * limitNum
+//     const to = from + limitNum - 1
+
+//     // Query the view (already nested + filtered to stops that have orders)
+//     let q = database
+//       .from('loads_with_tree')
+//       .select(
+//         'id, route_id, branch_id, branch_name, delivery_date, status, vehicle_id, driver_id, route_name, total_quantity, total_weight, created_at, updated_at, load_stops'
+//       )
+//       .order('route_name', { ascending: true, nullsFirst: true })
+//       .range(from, to)
+
+//     // Filters
+//     if (date) q = q.eq('delivery_date', date) // must be YYYY-MM-DD
+//     if (route_id) q = q.eq('route_id', route_id)
+//     if (route_name) q = q.ilike('route_name', `%${route_name}%`)
+//     if (status) q = q.eq('status', status)
+
+//     const { data, error } = await q
+//     if (error) {
+//       return res
+//         .status(500)
+//         .send(new Response(500, 'Error fetching loads', error.message))
+//     }
+
+//     // Optionally strip items if includeItems !== 'true'
+//     const results = (data || []).map((load) => ({
+//       ...load,
+//       load_stops: (load.load_stops || []).map((stop) => ({
+//         ...stop,
+//         load_orders: (stop.load_orders || []).map((order) => {
+//           if (includeItems === 'true') return order
+//           const { load_items, ...rest } = order
+//           return rest
+//         }),
+//       })),
+//     }))
+
+//     return res.status(200).send(
+//       new Response(200, 'OK', 'Loads fetched', {
+//         page: pageNum,
+//         limit: limitNum,
+//         count: results.length,
+//         results,
+//       })
+//     )
+//   } catch (err) {
+//     return res.status(500).send(new Response(500, 'Server Error', err.message))
+//   }
+// }
+
 import database from '../config/supabase.js'
 import { Response } from '../utils/classes.js'
 
 /**
- * GET /api/loads
+ * GET /api/loads  (now route-grouped)
  * Query params:
- *   - date: YYYY-MM-DD (optional)
- *   - route_id: uuid (optional)
- *   - route_name: string (optional; ILIKE filter)
- *   - status: planned|assigned|loaded|delivered|cancelled (optional)
+ *   - date: YYYY-MM-DD (optional; filters orders by order.delivery_date)
+ *   - status: planned|assigned|loaded|delivered|cancelled (optional; filters orders by order_status)
+ *   - route_id: uuid (optional; filters routes)
+ *   - route_name: string (optional; ILIKE filter on routes)
  *   - includeItems: 'true' | 'false' (optional; default false)
  *   - page: number (optional; default 1)
- *   - limit: number (optional; default 50)
+ *   - limit: number (optional; default 50; max 200)
+ *
+ * Response shape (per route):
+ * {
+ *   route_id, route_name, branch_id, branch_name,
+ *   suburbs: [
+ *     {
+ *       suburb_name, city, province, postal_code, position,
+ *       load_orders: [
+ *         { id, load_id, delivery_date, sales_order_number, ...,
+ *           load_items?: [...] // omitted if includeItems !== 'true'
+ *         }
+ *       ]
+ *     }
+ *   ]
+ * }
  */
 export const getLoads = async (req, res) => {
   try {
     const {
       date,
+      status,
       route_id,
       route_name,
-      status,
       includeItems = 'false',
       page = '1',
-      limit = '200',
+      limit = '50',
     } = req.query
 
     const pageNum = Math.max(parseInt(page, 10) || 1, 1)
@@ -193,47 +287,66 @@ export const getLoads = async (req, res) => {
     const from = (pageNum - 1) * limitNum
     const to = from + limitNum - 1
 
-    // Query the view (already nested + filtered to stops that have orders)
+    // Pull route-grouped tree from the view.
+    // NOTE: The view must be created from the route-first SQL we finalized.
     let q = database
-      .from('loads_with_tree')
-      .select(
-        'id, route_id, branch_id, branch_name, delivery_date, status, vehicle_id, driver_id, route_name, total_quantity, total_weight, created_at, updated_at, load_stops'
-      )
+      .from('routes_with_tree')
+      .select('route_id, route_name, branch_id, branch_name, suburbs')
       .order('route_name', { ascending: true, nullsFirst: true })
-      .range(from, to)
 
-    // Filters
-    if (date) q = q.eq('delivery_date', date) // must be YYYY-MM-DD
     if (route_id) q = q.eq('route_id', route_id)
     if (route_name) q = q.ilike('route_name', `%${route_name}%`)
-    if (status) q = q.eq('status', status)
+
+    // Apply DB-level pagination on routes
+    q = q.range(from, to)
 
     const { data, error } = await q
     if (error) {
       return res
         .status(500)
-        .send(new Response(500, 'Error fetching loads', error.message))
+        .send(new Response(500, 'Error fetching routes', error.message))
     }
 
-    // Optionally strip items if includeItems !== 'true'
-    const results = (data || []).map((load) => ({
-      ...load,
-      load_stops: (load.load_stops || []).map((stop) => ({
-        ...stop,
-        load_orders: (stop.load_orders || []).map((order) => {
-          if (includeItems === 'true') return order
-          const { load_items, ...rest } = order
-          return rest
-        }),
-      })),
-    }))
+    // Post-filter suburbs & orders by requested date/status.
+    // Also strip items if includeItems !== 'true'.
+    const filtered = (data || [])
+      .map((route) => {
+        const suburbs = (route.suburbs || [])
+          .map((s) => {
+            let orders = s.load_orders || []
 
+            if (date) {
+              // delivery_date comes from the SQL as a DATE, serialized as 'YYYY-MM-DD'
+              orders = orders.filter((o) => o.delivery_date === date)
+            }
+            if (status) {
+              orders = orders.filter(
+                (o) =>
+                  (o.order_status || '').toLowerCase() === status.toLowerCase()
+              )
+            }
+
+            if (includeItems !== 'true') {
+              orders = orders.map(({ load_items, ...rest }) => rest)
+            }
+
+            return { ...s, load_orders: orders }
+          })
+          // drop suburbs with no remaining orders
+          .filter((s) => (s.load_orders || []).length > 0)
+
+        return { ...route, suburbs }
+      })
+      // drop routes with no remaining suburbs
+      .filter((r) => (r.suburbs || []).length > 0)
+
+    // Return the page slice we actually fetched; count = filtered routes in this page
     return res.status(200).send(
-      new Response(200, 'OK', 'Loads fetched', {
+      new Response(200, 'OK', 'Routes fetched', {
         page: pageNum,
         limit: limitNum,
-        count: results.length,
-        results,
+        count: filtered.length,
+        results: filtered,
       })
     )
   } catch (err) {
