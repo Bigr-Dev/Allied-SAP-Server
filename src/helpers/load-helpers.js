@@ -120,7 +120,7 @@ export async function getOrCreateLoad(route, deliveryDate) {
     route_id: route.id,
     branch_id: route.branch_id ?? null,
     delivery_date: deliveryDate,
-    status: 'planned',
+    status: 'unassigned',
     route_name: route.name ?? null,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
