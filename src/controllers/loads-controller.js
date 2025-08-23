@@ -185,7 +185,7 @@ export const getLoads = async (req, res) => {
       status,
       includeItems = 'false',
       page = '1',
-      limit = '50',
+      limit = '200',
     } = req.query
 
     const pageNum = Math.max(parseInt(page, 10) || 1, 1)
