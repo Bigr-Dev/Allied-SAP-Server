@@ -47,6 +47,13 @@ import {
   logout,
   refreshSupabaseSession,
 } from '../controllers/client-auth-controller.js'
+import {
+  createRoute,
+  deleteRoute,
+  getRouteById,
+  getRoutes,
+  updateRoute,
+} from '../controllers/routes-controller.js'
 
 // --------------------//
 // Client endpoints
@@ -64,6 +71,13 @@ router.post('/logout', logout)
 
 // sap data
 router.get('/orders', apiClientAuth, getSalesOrders)
+
+// route routes
+router.get('/routes', apiClientAuth, getRoutes)
+router.get('/routes/:id', apiClientAuth, getRouteById)
+router.post('/routes', apiClientAuth, createRoute)
+router.put('/routes/:id', apiClientAuth, updateRoute)
+router.delete('/routes/:id', apiClientAuth, deleteRoute)
 
 // branch routes
 router.get('/branches', apiClientAuth, getAllBranches)

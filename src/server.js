@@ -95,7 +95,7 @@ app.get('/api/health', (req, res) => {
 })
 
 // Apply rate limiter AFTER health
-app.use(limiter)
+// app.use(limiter)
 
 // SAP routes
 app.use('/sap', sapRouter)
