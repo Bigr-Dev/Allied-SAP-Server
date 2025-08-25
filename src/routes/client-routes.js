@@ -54,6 +54,7 @@ import {
   getRoutes,
   updateRoute,
 } from '../controllers/routes-controller.js'
+import { getAllItemsWithContext, getGroupedRoutes } from '../controllers/groupedRoutesController.js'
 
 // --------------------//
 // Client endpoints
@@ -116,5 +117,34 @@ router.delete('/vehicles/:id', apiClientAuth, deleteVehicle)
 
 // loads
 router.get('/loads', apiClientAuth, getLoads)
+
+// grouped routes
+/**
+ * GET /api/grouped-routes
+ * 
+ * Query Parameters:
+ * - route: Filter by route ID
+ * - route_name: Filter by route name (partial match)
+ * - customer_name: Filter by customer name
+ * - branch_id: Filter by branch ID
+ * - include_suburbs: Include suburbs data (default: true)
+ * - include_items: Include detailed items (default: true)
+ * 
+ * Returns grouped routes with compatibility analysis
+ */
+router.get('/grouped-routes', apiClientAuth, getGroupedRoutes)
+
+/**
+ * GET /api/grouped-routes/items
+ * 
+ * Query Parameters:
+ * - route: Filter by route ID
+ * - route_name: Filter by route name (partial match)
+ * - customer_name: Filter by customer name
+ * - branch_id: Filter by branch ID
+ * 
+ * Returns all items with full customer and order context
+ */
+router.get('/grouped-routes/items', apiClientAuth, getAllItemsWithContext)
 
 export default router
