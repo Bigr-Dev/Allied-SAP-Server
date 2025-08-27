@@ -110,28 +110,112 @@ function scoreVehicle(v, needKg, needLenMm) {
   const lPart = (v.lengthMm / Math.max(needLenMm || 1, 1)) * 0.85
   return wPart + lPart
 }
+function buildLoadManifest(
+  load,
+  requiredLenMm,
+  assmFlag,
+  detailLevel = 'order',
+  maxItemsPerOrder = 100
+) {
+  const zones = zoneKeysForLoad(load)
+  const needKg = loadRequiredWeightKg(load)
+  const manifest = {
+    load_id: load.id,
+    route_id: load.route_id,
+    route_name: load.route_name,
+    branch_id: load.branch_id,
+    branch_name: load.branch_name,
+    required_kg: needKg,
+    required_length_mm: requiredLenMm,
+    assm_load: assmFlag,
+    zones,
+  }
+
+  if (detailLevel === 'load') return manifest
+
+  // orders (and optionally items)
+  const orders = []
+  for (const stop of load.load_stops || []) {
+    for (const order of stop.load_orders || []) {
+      const o = {
+        order_id: order.id,
+        sales_order_number: order.sales_order_number,
+        customer_name: order.customer_name,
+        order_status: order.order_status,
+        total_weight:
+          Number(order.total_weight) ||
+          (order.load_items || []).reduce(
+            (s, it) => s + (Number(it.weight) || 0),
+            0
+          ),
+      }
+      if (detailLevel === 'item') {
+        const items = (order.load_items || [])
+          .slice(0, maxItemsPerOrder)
+          .map((it) => ({
+            id: it.id,
+            description: it.description,
+            quantity: it.quantity,
+            weight: Number(it.weight) || 0,
+            length: it.length,
+          }))
+        o.items = items
+        if ((order.load_items || []).length > items.length) {
+          o.items_truncated = order.load_items.length - items.length
+        }
+      }
+      orders.push(o)
+    }
+  }
+  manifest.orders = orders
+  return manifest
+}
 
 export const autoAssignLoads = async (req, res) => {
   try {
+    // const {
+    //   date,
+    //   route_id,
+    //   route_name,
+    //   order_status,
+    //   commit = false,
+
+    //   // new knobs
+    //   capacityHeadroom = 0.1,
+    //   lengthBufferMm = 600,
+    //   maxTrucksPerZone = 2,
+    //   maxLoadsPerVehicle = 6,
+
+    //   // NEW fallbacks & toggles
+    //   defaultVehicleCapacityKg = 33000,
+    //   defaultVehicleLengthMm = 12000,
+    //   ignoreLengthIfMissing = true,
+    //   ignoreDepartment = false,
+    //   debug = false,
+    // } = req.body || {}
     const {
       date,
       route_id,
       route_name,
       order_status,
       commit = false,
-
-      // new knobs
       capacityHeadroom = 0.1,
       lengthBufferMm = 600,
       maxTrucksPerZone = 2,
       maxLoadsPerVehicle = 6,
+      branch_id, // NEW: single branch id
+      branch_ids, // NEW: array of branch ids
 
-      // NEW fallbacks & toggles
+      // existing fallbacks/debug
       defaultVehicleCapacityKg = 33000,
       defaultVehicleLengthMm = 12000,
       ignoreLengthIfMissing = true,
       ignoreDepartment = false,
       debug = false,
+
+      // NEW: manifest controls
+      detailLevel = 'order', // 'load' | 'order' | 'item'
+      maxItemsPerOrder = 100, // to cap payload size
     } = req.body || {}
 
     if (!date) {
@@ -197,6 +281,10 @@ export const autoAssignLoads = async (req, res) => {
       .eq('delivery_date', date)
     if (route_id) q = q.eq('route_id', route_id)
     if (route_name) q = q.ilike('route_name', `%${route_name}%`)
+    if (branch_id) q = q.eq('branch_id', branch_id)
+    if (Array.isArray(branch_ids) && branch_ids.length) {
+      q = q.in('branch_id', branch_ids)
+    }
     const { data: loadsRaw, error: loadErr } = await q
     if (loadErr) throw loadErr
 
@@ -347,24 +435,113 @@ export const autoAssignLoads = async (req, res) => {
       }
     }
 
+    // index loads by id so we can pull full detail for the manifest
+    const loadIndex = new Map()
+    for (const l of loads) loadIndex.set(l.id, l)
+
+    // group assigned by vehicle
+    const assignmentsByVehicle = {}
+    let assignmentsByLoad = {}
+    for (const d of decisions) {
+      const l = loadIndex.get(d.load_id)
+      const requiredLen = d.required_length_mm
+      const assmFlag = !!d.assm_load
+
+      if (d.vehicle_id) {
+        if (!assignmentsByVehicle[d.vehicle_id]) {
+          assignmentsByVehicle[d.vehicle_id] = {
+            vehicle_id: d.vehicle_id,
+            total_assigned_kg: 0,
+            assigned_load_count: 0,
+            loads: [],
+          }
+        }
+        const m = buildLoadManifest(
+          l,
+          requiredLen,
+          assmFlag,
+          detailLevel,
+          maxItemsPerOrder
+        )
+        assignmentsByVehicle[d.vehicle_id].loads.push(m)
+        assignmentsByVehicle[d.vehicle_id].assigned_load_count += 1
+        assignmentsByVehicle[d.vehicle_id].total_assigned_kg += d.required_kg
+        assignmentsByLoad[d.load_id] = { vehicle_id: d.vehicle_id, ...m }
+      } else {
+        // unassigned – still include a detailed reasoned manifest
+        const m = buildLoadManifest(
+          l,
+          requiredLen,
+          assmFlag,
+          detailLevel,
+          maxItemsPerOrder
+        )
+        assignmentsByLoad[d.load_id] = {
+          vehicle_id: null,
+          reason: d.reason,
+          ...m,
+        }
+      }
+    }
+
+    // optional: attach basic vehicle metadata for the header row (friendly manifest)
+    const vehicleMeta = {}
+    if (debug) {
+      for (const v of vehicles) {
+        vehicleMeta[v.id] = {
+          category: v.category,
+          lengthMm: v.lengthMm,
+          capacityAvailKg: v.capacityAvailKg,
+        }
+      }
+    }
+
+    // const body = {
+    //   date,
+    //   totals: {
+    //     assigned_kg: totalAssignedKg,
+    //     unassigned_kg: totalUnassignedKg,
+    //   },
+    //   parameters: {
+    //     capacity_headroom: `${Math.round((capacityHeadroom || 0) * 100)}%`,
+    //     length_buffer_mm: Number(lengthBufferMm || 0),
+    //     zone_truck_cap: maxTrucksPerZone,
+    //     max_loads_per_vehicle: maxLoadsPerVehicle,
+    //     default_vehicle_capacity_kg: defaultVehicleCapacityKg,
+    //     default_vehicle_length_mm: defaultVehicleLengthMm,
+    //     ignore_length_if_missing: !!ignoreLengthIfMissing,
+    //     ignore_department: !!ignoreDepartment,
+    //   },
+    //   ...(debug ? { vehicle_pool_snapshot: vehicleSnapshot } : {}),
+    //   decisions,
+    // }
     const body = {
       date,
       totals: {
         assigned_kg: totalAssignedKg,
         unassigned_kg: totalUnassignedKg,
       },
-      parameters: {
-        capacity_headroom: `${Math.round((capacityHeadroom || 0) * 100)}%`,
-        length_buffer_mm: Number(lengthBufferMm || 0),
-        zone_truck_cap: maxTrucksPerZone,
-        max_loads_per_vehicle: maxLoadsPerVehicle,
-        default_vehicle_capacity_kg: defaultVehicleCapacityKg,
-        default_vehicle_length_mm: defaultVehicleLengthMm,
-        ignore_length_if_missing: !!ignoreLengthIfMissing,
-        ignore_department: !!ignoreDepartment,
-      },
-      ...(debug ? { vehicle_pool_snapshot: vehicleSnapshot } : {}),
-      decisions,
+      // parameters: {
+      //   capacity_headroom: `${Math.round((capacityHeadroom || 0) * 100)}%`,
+      //   length_buffer_mm: Number(lengthBufferMm || 0),
+      //   zone_truck_cap: maxTrucksPerZone,
+      //   max_loads_per_vehicle: maxLoadsPerVehicle,
+      //   default_vehicle_capacity_kg: defaultVehicleCapacityKg,
+      //   default_vehicle_length_mm: defaultVehicleLengthMm,
+      //   ignore_length_if_missing: !!ignoreLengthIfMissing,
+      //   ignore_department: !!ignoreDepartment,
+      //   detail_level: detailLevel,
+      //   max_items_per_order: maxItemsPerOrder,
+      // },
+      // ...(debug
+      //   ? { vehicle_pool_snapshot: vehicleSnapshot, vehicle_meta: vehicleMeta }
+      //   : {}),
+      // decisions,
+      assignments_by_vehicle: Object.values(assignmentsByVehicle),
+      assignments_by_load: assignmentsByLoad,
+      unassigned_details: decisions
+        .filter((d) => !d.vehicle_id)
+        .map((d) => assignmentsByLoad[d.load_id]), // already contains reason + manifest
     }
 
     const msg = commit
