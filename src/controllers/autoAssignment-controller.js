@@ -538,7 +538,7 @@ export const autoAssignLoads = async (req, res) => {
       //   : {}),
       // decisions,
       assignments_by_vehicle: Object.values(assignmentsByVehicle),
-      assignments_by_load: assignmentsByLoad,
+      assignments_by_load: Object.values(assignmentsByLoad),
       unassigned_details: decisions
         .filter((d) => !d.vehicle_id)
         .map((d) => assignmentsByLoad[d.load_id]), // already contains reason + manifest
