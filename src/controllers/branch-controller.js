@@ -3,17 +3,50 @@ import { Response } from '../utils/classes.js'
 
 const table = 'branches'
 
-export const getAllBranches = async (req, res) => {
-  const { data, error } = await database
-    .from(table)
-    .select('*')
-    .order('created_at', { ascending: false })
+// export const getAllBranches = async (req, res) => {
+//   const { data, error } = await database
+//     .from(table)
+//     .select('*')
+//     .order('created_at', { ascending: false })
 
-  if (error)
+//   if (error)
+//     return res
+//       .status(500)
+//       .send(new Response(500, 'Error fetching branches', error.message))
+//   return res.status(200).send(new Response(200, 'OK', data))
+// }
+export const getAllBranches = async (req, res) => {
+  try {
+    const { data, error } = await database
+      .from('branches')
+      .select(
+        `
+        *,
+        user_count:users!users_branch_id_fkey(count),
+        vehicle_count:vehicles!vehicles_branch_id_fkey(count)
+      `
+      )
+      .order('created_at', { ascending: false })
+
+    if (error) {
+      return res
+        .status(500)
+        .send(new Response(500, 'Error fetching branches', error.message))
+    }
+
+    // The nested counts come back as arrays like [{ count: 3 }]
+    const shaped = data.map(({ user_count, vehicle_count, ...b }) => ({
+      ...b,
+      user_count: user_count?.[0]?.count ?? 0,
+      vehicle_count: vehicle_count?.[0]?.count ?? 0,
+    }))
+
+    return res.status(200).send(new Response(200, 'OK', shaped))
+  } catch (err) {
     return res
       .status(500)
-      .send(new Response(500, 'Error fetching branches', error.message))
-  return res.status(200).send(new Response(200, 'OK', data))
+      .send(new Response(500, 'Error fetching branches', err.message))
+  }
 }
 
 export const getBranchById = async (req, res) => {
@@ -31,21 +64,6 @@ export const getBranchById = async (req, res) => {
   return res.status(200).send(new Response(200, 'OK', data))
 }
 
-// export const createBranch = async (req, res) => {
-//   const branch = {
-//     ...req.body,
-//     created_at: new Date().toISOString(),
-//     updated_at: new Date().toISOString(),
-//   }
-
-//   const { error, ...response } = await database.from(table).insert([branch])
-//   if (error)
-//     return res
-//       .status(500)
-//       .send(new Response(500, 'Create failed', error.message))
-//   console.log('response :>> ', response)
-//   return res.status(201).send(new Response(201, 'Branch created'))
-// }
 export const createBranch = async (req, res) => {
   try {
     const branch = {
