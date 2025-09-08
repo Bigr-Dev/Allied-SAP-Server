@@ -260,12 +260,142 @@ export const updateUser = async (req, res) => {
   return res.status(200).send(new Response(200, 'User updated'))
 }
 
+// DELETE /users/:id            -> hard delete in Auth
+// DELETE /users/:id?soft=true  -> soft delete in Auth
+
 export const deleteUser = async (req, res) => {
   const { id } = req.params
-  const { error } = await database.from(table).delete().eq('id', id)
-  if (error)
+  const soft = String(req.query.soft || '').toLowerCase() === 'true'
+
+  try {
+    // 0) Look up profile (adjust column if you store auth uid elsewhere)
+    const { data: profile, error: lookupErr } = await database
+      .from('users')
+      .select('id, email')
+      .eq('id', id)
+      .single()
+
+    if (lookupErr && lookupErr.code !== 'PGRST116') {
+      return res
+        .status(500)
+        .send(new Response(500, 'Lookup failed', lookupErr.message))
+    }
+
+    // 1) Remove DB profile first (so the FK can’t block Auth deletion)
+    if (profile) {
+      const { error: dbErr } = await database
+        .from('users')
+        .delete()
+        .eq('id', id)
+      if (dbErr) {
+        return res
+          .status(500)
+          .send(new Response(500, 'DB delete failed', dbErr.message))
+      }
+    }
+
+    // 2) Remove from Auth (needs service role key)
+    const { error: authErr } = await database.auth.admin.deleteUser(
+      id,
+      !soft ? false : true
+    )
+    if (authErr) {
+      // You can optionally “ban” if soft/hard delete keeps failing:
+      // await database.auth.admin.updateUserById(id, { banned_until: '2999-01-01T00:00:00Z' })
+      return res
+        .status(500)
+        .send(new Response(500, 'Auth delete failed', authErr.message))
+    }
+
+    return res
+      .status(200)
+      .send(
+        new Response(
+          200,
+          `User deleted (${soft ? 'soft in Auth' : 'hard in Auth'})`
+        )
+      )
+  } catch (err) {
     return res
       .status(500)
-      .send(new Response(500, 'Delete failed', error.message))
-  return res.status(200).send(new Response(200, 'User deleted'))
+      .send(new Response(500, 'Unexpected error', err.message))
+  }
 }
+
+// export const deleteUser = async (req, res) => {
+//   const { id } = req.params
+
+//   try {
+//     // Optional: verify the profile exists first (nice for 404s and logging)
+//     const { data: existing, error: fetchErr } = await database
+//       .from('users')
+//       .select('id, email')
+//       .eq('id', id)
+//       .single()
+
+//     if (fetchErr && fetchErr.code !== 'PGRST116') {
+//       // Unexpected fetch error (not "No rows")
+//       return res
+//         .status(500)
+//         .send(new Response(500, 'Lookup failed', fetchErr.message))
+//     }
+
+//     if (!existing) {
+//       // No profile row; still try to remove the auth user to avoid stragglers
+//       const { error: authErr } = await database.auth.admin.deleteUser(id, {
+//         shouldSoftDelete: false,
+//       })
+//       if (authErr) {
+//         return res
+//           .status(404)
+//           .send(new Response(404, 'User not found in DB or Auth'))
+//       }
+//       return res
+//         .status(200)
+//         .send(new Response(200, 'Auth user deleted (no DB profile found)'))
+//     }
+
+//     // 1) Delete profile row
+//     const { error: dbErr } = await database.from('users').delete().eq('id', id)
+//     if (dbErr) {
+//       return res
+//         .status(500)
+//         .send(new Response(500, 'Delete failed', dbErr.message))
+//     }
+
+//     // 2) Delete Auth user (server-side admin)
+//     const { error: authErr } = await database.auth.admin.deleteUser(id, {
+//       shouldSoftDelete: false, // hard delete; omit or set true if you prefer soft-deletion
+//     })
+//     if (authErr) {
+//       // At this point profile is gone but auth remains; report clearly
+//       return res
+//         .status(500)
+//         .send(
+//           new Response(
+//             500,
+//             'Profile deleted, but Auth delete failed',
+//             authErr.message
+//           )
+//         )
+//     }
+
+//     return res
+//       .status(200)
+//       .send(new Response(200, 'User deleted from DB and Auth'))
+//   } catch (err) {
+//     return res
+//       .status(500)
+//       .send(new Response(500, 'Unexpected error', err.message))
+//   }
+// }
+
+// export const deleteUser = async (req, res) => {
+//   const { id } = req.params
+//   const { error } = await database.from(table).delete().eq('id', id)
+//   if (error)
+//     return res
+//       .status(500)
+//       .send(new Response(500, 'Delete failed', error.message))
+//   return res.status(200).send(new Response(200, 'User deleted'))
+// }
