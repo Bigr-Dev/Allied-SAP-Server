@@ -58,7 +58,21 @@ import {
   getAllItemsWithContext,
   getGroupedRoutes,
 } from '../controllers/groupedRoutesController.js'
-import { autoAssignLoads } from '../controllers/autoAssignment-controller.js'
+import {
+  autoAssign,
+  getVehicleAssignmentsByDate,
+  unassign,
+  // manuallyAssign,
+  // unassign,
+} from '../controllers/autoAssignment-controller.js'
+import {
+  autoAssignLoads,
+  getFullPlan,
+  getPlanById,
+  manuallyAssign,
+  unassignAll,
+} from '../controllers/assignment-planner-controller.js'
+// import { autoAssignLoads } from '../../old-code/autoAssignment-controller.js'
 
 // --------------------//
 // Client endpoints
@@ -151,7 +165,18 @@ router.get('/grouped-routes', apiClientAuth, getGroupedRoutes)
  */
 router.get('/grouped-routes/items', apiClientAuth, getAllItemsWithContext)
 
-// auto assign
-router.post('/auto-assign/loads', apiClientAuth, autoAssignLoads)
+// vehicle assignment
+//router.post('/auto-assign', apiClientAuth, autoAssign)
+//router.post('/assignments/:planId/unassign/:assignmentId', async (req, res) => {
+//router.post('/assignments/:planId/unassign-all', async (req, res) => {
+// router.get('/assignments/:planId/unit/:unitId',
+//router.get('/vehicle-assignments', apiClientAuth, getVehicleAssignmentsByDate)
+// assignment planner
+router.post('/auto-assign-loads', apiClientAuth, autoAssignLoads)
+router.post('/manual-assign', apiClientAuth, manuallyAssign)
+router.post('/unassign', apiClientAuth, unassign)
+router.post('/unassign-all', apiClientAuth, unassignAll)
+router.get('/assignments/:planId', apiClientAuth, getFullPlan)
+router.get('/assignments/:planId/unit/:unitId', apiClientAuth, getPlanById)
 
 export default router

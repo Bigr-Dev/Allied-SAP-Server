@@ -1,554 +1,593 @@
-// controllers/autoAssignment-controller.js
+// controllers/autoAssignmentController.js
 import database from '../config/supabase.js'
 import { Response } from '../utils/classes.js'
+import {
+  normalizeVehicles,
+  needWeightKg,
+  needMaxLengthMm,
+  needMaxWidthMm,
+  seedCustomerCapFromLoads,
+  respectsCustomerCap,
+  chooseUnitForLoad,
+} from '../utils/assignmentRules.js'
+import {
+  parseCapacityToKg,
+  parseLengthToMm,
+  parseDimsFromString,
+} from '../utils/units.js'
 
-function parseLengthToMm(raw) {
-  if (raw == null) return 0
-  const s = String(raw).trim().toLowerCase()
-  if (!s || s === '0') return 0
-  const mm = s.match(/([\d.,]+)\s*mm\b/)
-  const m = s.match(/([\d.,]+)\s*m\b/)
-  const num = (str) => Number(String(str).replace(/,/g, ''))
-  if (mm) return Math.round(num(mm[1]) || 0)
-  if (m) return Math.round((num(m[1]) || 0) * 1000)
-  const n = num(s)
-  if (!Number.isFinite(n)) return 0
-  return n > 100 ? Math.round(n) : Math.round(n * 1000)
-}
-
-function parseCapacityToKg(raw) {
-  if (raw == null) return 0
-  const s = String(raw).trim().toLowerCase()
-  if (!s) return 0
-  const num = Number(s.replace(/[^\d.,]/g, '').replace(/,/g, '')) || 0
-  const hasTon = /\b(t|ton|tons|tonne|tonnes)\b/.test(s)
-  const hasKg = /\bkg\b/.test(s)
-  if (hasTon && !hasKg) return Math.round(num * 1000)
-  return Math.round(num)
-}
-
-function parseVehicleLengthFromDimensions(raw) {
-  if (!raw) return 0
-  const s = String(raw).toLowerCase()
-  const labeled = s.match(
-    /(?:^|[^a-z])l(?:ength)?\s*[:=]?\s*([\d.,]+)\s*(m|mm)\b/
+async function logAssignment({
+  date,
+  load_id,
+  vehicle_id,
+  role,
+  source = 'auto',
+  assigned_by = null,
+}) {
+  return database.from('vehicle_assignments').upsert(
+    {
+      assignment_date: date,
+      load_id,
+      vehicle_id,
+      role,
+      source,
+      assigned_by,
+    },
+    { onConflict: 'assignment_date,load_id,role' }
   )
-  if (labeled) {
-    const [, val, unit] = labeled
-    return unit === 'mm'
-      ? parseLengthToMm(`${val}mm`)
-      : parseLengthToMm(`${val}m`)
-  }
-  const parts = s.split(/[^0-9.,m]+x[^0-9.,m]+/i).filter(Boolean)
-  if (parts.length >= 2) {
-    const mmVals = parts.map(parseLengthToMm).filter((n) => n > 0)
-    if (mmVals.length) return Math.max(...mmVals)
-  }
-  const nums = s.match(/[\d.,]+/g)
-  if (nums && nums.length) return parseLengthToMm(nums[0])
-  return 0
 }
 
-function loadRequiredWeightKg(load) {
-  if (
-    load?.total_weight != null &&
-    Number.isFinite(Number(load.total_weight))
-  ) {
-    return Number(load.total_weight)
-  }
-  let sum = 0
-  for (const stop of load?.load_stops || []) {
-    for (const order of stop?.load_orders || []) {
-      if (
-        order?.total_weight != null &&
-        Number.isFinite(Number(order.total_weight))
-      ) {
-        sum += Number(order.total_weight)
-      } else {
-        for (const it of order?.load_items || []) sum += Number(it?.weight) || 0
-      }
-    }
-  }
-  return Math.round(sum)
-}
-function loadMaxItemLengthMm(load) {
-  let mm = 0,
-    topItems = []
-  for (const stop of load?.load_stops || []) {
-    for (const order of stop?.load_orders || []) {
-      for (const it of order?.load_items || []) {
-        const L = parseLengthToMm(it?.length)
-        if (L > mm) mm = L
-        topItems.push({ id: it?.id, length_raw: it?.length, length_mm: L })
-      }
-    }
-  }
-  topItems.sort((a, b) => b.length_mm - a.length_mm)
-  return { mm, topItems: topItems.slice(0, 5) }
-}
-function isAssmLoad(load) {
-  for (const stop of load?.load_stops || []) {
-    for (const order of stop?.load_orders || []) {
-      const so = String(order?.sales_order_number || '').trim()
-      if (so.startsWith('7')) return true
-    }
-  }
-  return false
-}
-function zoneKeysForLoad(load) {
-  const set = new Set()
-  for (const s of load?.load_stops || []) {
-    const key = (s?.suburb_name || s?.city || 'UNKNOWN')
-      .toUpperCase()
-      .replace(/\s+/g, '')
-    set.add(key)
-  }
-  return Array.from(set)
-}
-function scoreVehicle(v, needKg, needLenMm) {
-  const wPart = (v.capacityAvailKg / Math.max(needKg, 1)) * 0.15
-  const lPart = (v.lengthMm / Math.max(needLenMm || 1, 1)) * 0.85
-  return wPart + lPart
-}
-function buildLoadManifest(
-  load,
-  requiredLenMm,
-  assmFlag,
-  detailLevel = 'order',
-  maxItemsPerOrder = 100
-) {
-  const zones = zoneKeysForLoad(load)
-  const needKg = loadRequiredWeightKg(load)
-  const manifest = {
-    load_id: load.id,
-    route_id: load.route_id,
-    route_name: load.route_name,
-    branch_id: load.branch_id,
-    branch_name: load.branch_name,
-    required_kg: needKg,
-    required_length_mm: requiredLenMm,
-    assm_load: assmFlag,
-    zones,
-  }
-
-  if (detailLevel === 'load') return manifest
-
-  // orders (and optionally items)
-  const orders = []
-  for (const stop of load.load_stops || []) {
-    for (const order of stop.load_orders || []) {
-      const o = {
-        order_id: order.id,
-        sales_order_number: order.sales_order_number,
-        customer_name: order.customer_name,
-        order_status: order.order_status,
-        total_weight:
-          Number(order.total_weight) ||
-          (order.load_items || []).reduce(
-            (s, it) => s + (Number(it.weight) || 0),
-            0
-          ),
-      }
-      if (detailLevel === 'item') {
-        const items = (order.load_items || [])
-          .slice(0, maxItemsPerOrder)
-          .map((it) => ({
-            id: it.id,
-            description: it.description,
-            quantity: it.quantity,
-            weight: Number(it.weight) || 0,
-            length: it.length,
-          }))
-        o.items = items
-        if ((order.load_items || []).length > items.length) {
-          o.items_truncated = order.load_items.length - items.length
-        }
-      }
-      orders.push(o)
-    }
-  }
-  manifest.orders = orders
-  return manifest
+async function setVehicleStatus(vehicleId, status = 'assigned') {
+  return database.from('vehicles').update({ status }).eq('id', vehicleId)
 }
 
-export const autoAssignLoads = async (req, res) => {
+async function fetchLoadsForDate({
+  date,
+  branch_id,
+  route_id,
+  route_name,
+  order_status,
+}) {
+  let q = database
+    .from('loads_with_tree')
+    .select(
+      `
+      id, route_id, route_name, branch_id, branch_name, delivery_date, status, total_weight, vehicle_id,
+      load_stops (
+        suburb_name, city, postal_code, position,
+        load_orders (
+          id, sales_order_number, customer_name, order_status, total_weight,
+          load_items ( id, weight, length, description, quantity )
+        )
+      )
+    `
+    )
+    .eq('delivery_date', date)
+
+  if (branch_id) q = q.eq('branch_id', branch_id)
+  if (route_id) q = q.eq('route_id', route_id)
+  if (route_name) q = q.ilike('route_name', `%${route_name}%`)
+
+  const { data, error } = await q
+  if (error) throw new Error(error.message)
+
+  const want = (order_status || '').toLowerCase().trim()
+  if (want) {
+    data.forEach((L) => {
+      L.load_stops = (L.load_stops || [])
+        .map((s) => {
+          const oo = (s.load_orders || []).filter(
+            (o) => String(o.order_status || '').toLowerCase() === want
+          )
+          return { ...s, load_orders: oo }
+        })
+        .filter((s) => (s.load_orders || []).length > 0)
+    })
+  }
+  return (data || []).filter((L) => (L.load_stops || []).length > 0)
+}
+
+async function fetchVehiclesRaw() {
+  const { data, error } = await database
+    .from('vehicles')
+    .select(
+      'id, branch_id, status, type, vehicle_category, capacity, length, width, dimensions, priority, assigned_to'
+    )
+  if (error) throw new Error(error.message)
+  return data
+}
+
+export const autoAssign = async (req, res) => {
   try {
-    // const {
-    //   date,
-    //   route_id,
-    //   route_name,
-    //   order_status,
-    //   commit = false,
-
-    //   // new knobs
-    //   capacityHeadroom = 0.1,
-    //   lengthBufferMm = 600,
-    //   maxTrucksPerZone = 2,
-    //   maxLoadsPerVehicle = 6,
-
-    //   // NEW fallbacks & toggles
-    //   defaultVehicleCapacityKg = 33000,
-    //   defaultVehicleLengthMm = 12000,
-    //   ignoreLengthIfMissing = true,
-    //   ignoreDepartment = false,
-    //   debug = false,
-    // } = req.body || {}
     const {
       date,
+      branch_id,
       route_id,
       route_name,
       order_status,
-      commit = false,
       capacityHeadroom = 0.1,
       lengthBufferMm = 600,
-      maxTrucksPerZone = 2,
+      widthBufferMm = 0,
       maxLoadsPerVehicle = 6,
-      branch_id, // NEW: single branch id
-      branch_ids, // NEW: array of branch ids
-
-      // existing fallbacks/debug
-      defaultVehicleCapacityKg = 33000,
-      defaultVehicleLengthMm = 12000,
-      ignoreLengthIfMissing = true,
-      ignoreDepartment = false,
-      debug = false,
-
-      // NEW: manifest controls
-      detailLevel = 'order', // 'load' | 'order' | 'item'
-      maxItemsPerOrder = 100, // to cap payload size
+      enforceSameBranch = true,
+      ignoreWidthIfMissing = true,
+      commit = false,
     } = req.body || {}
 
     if (!date) {
       return res
         .status(400)
-        .json(new Response(400, 'Bad Request', 'date (YYYY-MM-DD) is required'))
+        .send(new Response(400, 'Bad Request', 'date is required'))
     }
 
-    // vehicles
-    const { data: vehiclesRaw, error: vehErr } = await database
-      .from('vehicles')
-      .select('id, vehicle_category, capacity, dimensions, status, priority')
-    if (vehErr) throw vehErr
+    const loadsToday = await fetchLoadsForDate({
+      date,
+      branch_id,
+      route_id,
+      route_name,
+      order_status,
+    })
+    const vehiclesRaw = await fetchVehiclesRaw()
+    const vehicles = normalizeVehicles(vehiclesRaw)
 
-    const vehicles = (vehiclesRaw || [])
-      .filter((v) => String(v.status || '').toLowerCase() !== 'inactive')
-      .map((v) => {
-        let capKg = parseCapacityToKg(v.capacity)
-        let lengthMm = parseVehicleLengthFromDimensions(v.dimensions)
-        // apply fallbacks
-        if (!capKg) capKg = defaultVehicleCapacityKg
-        if (!lengthMm && !ignoreLengthIfMissing)
-          lengthMm = defaultVehicleLengthMm
-        // capacity headroom like C# tonnage * 1.1
-        const effCap = Math.max(
-          0,
-          Math.round(capKg * (1 + Number(capacityHeadroom || 0)))
-        )
-        const cat = String(v.vehicle_category || '').toUpperCase()
-        return {
-          id: v.id,
-          raw: {
-            capacity: v.capacity,
-            dimensions: v.dimensions,
-            category: cat,
-          },
-          category: cat,
-          priority: Number.isFinite(Number(v.priority))
-            ? Number(v.priority)
-            : 0,
-          capacityAvailKg: effCap,
-          lengthMm: lengthMm, // may be 0 if unknown and ignoreLengthIfMissing=true
-          assignedCount: 0,
-        }
-      })
+    const trucksByCustomer = new Map()
+    seedCustomerCapFromLoads(loadsToday, trucksByCustomer)
 
-    // loads
-    let q = database
-      .from('loads_with_tree')
-      .select(
-        `
-        id, route_id, route_name, branch_id, branch_name,
-        delivery_date, status, total_weight,
-        load_stops (
-          suburb_name, city, postal_code, position,
-          load_orders (
-            id, sales_order_number, customer_name, order_status, total_weight,
-            load_items ( id, weight, length, description, quantity )
-          )
-        )
-      `
-      )
-      .eq('delivery_date', date)
-    if (route_id) q = q.eq('route_id', route_id)
-    if (route_name) q = q.ilike('route_name', `%${route_name}%`)
-    if (branch_id) q = q.eq('branch_id', branch_id)
-    if (Array.isArray(branch_ids) && branch_ids.length) {
-      q = q.in('branch_id', branch_ids)
+    const opts = {
+      capacityHeadroom,
+      lengthBufferMm,
+      widthBufferMm,
+      maxLoadsPerVehicle,
+      enforceSameBranch,
+      ignoreWidthIfMissing,
     }
-    const { data: loadsRaw, error: loadErr } = await q
-    if (loadErr) throw loadErr
 
-    const loads = (loadsRaw || [])
-      .map((load) => {
-        if (!order_status) return load
-        const stops = (load.load_stops || [])
-          .map((s) => ({
-            ...s,
-            load_orders: (s.load_orders || []).filter(
-              (o) =>
-                String(o?.order_status || '').toLowerCase() ===
-                String(order_status).toLowerCase()
-            ),
-          }))
-          .filter((s) => (s.load_orders || []).length > 0)
-        return { ...load, load_stops: stops }
-      })
-      .filter((l) => (l.load_stops || []).length > 0)
-
-    const zoneTruckMap = new Map()
     const decisions = []
-    const vehicleSnapshot = debug
-      ? vehicles.map((v) => ({
-          id: v.id,
-          category: v.category,
-          capacityAvailKg: v.capacityAvailKg,
-          lengthMm: v.lengthMm,
-          raw: v.raw,
-        }))
-      : undefined
+    let assignedKg = 0,
+      unassignedKg = 0
 
-    let totalAssignedKg = 0
-    let totalUnassignedKg = 0
-
-    for (const load of loads) {
-      const needKg = loadRequiredWeightKg(load)
-      const { mm: maxItemLen, topItems } = loadMaxItemLengthMm(load)
-      const needLenMm = (maxItemLen || 0) + Number(lengthBufferMm || 0)
-      const assm = isAssmLoad(load)
-      const zones = zoneKeysForLoad(load)
-
-      const blocked = zones.some(
-        (z) => zoneTruckMap.get(z)?.size >= maxTrucksPerZone
-      )
-      if (blocked) {
-        totalUnassignedKg += needKg
-        decisions.push({
-          load_id: load.id,
-          route_id: load.route_id,
-          route_name: load.route_name,
-          branch_id: load.branch_id,
-          branch_name: load.branch_name,
-          required_kg: needKg,
-          required_length_mm: needLenMm,
-          ...(debug ? { longest_items: topItems } : {}),
-          reason: `Zone cap reached (${maxTrucksPerZone})`,
-        })
+    for (const load of loadsToday) {
+      const choice = chooseUnitForLoad({
+        vehicles,
+        load,
+        opts,
+        trucksByCustomer,
+      })
+      if (!choice) {
+        const reason =
+          'No matching unit (capacity/length/width/branch/customer cap or no pre-linked horse+trailer)'
+        const needKg = needWeightKg(load)
+        unassignedKg += needKg
+        decisions.push({ load_id: load.id, vehicle: null, reason, needKg })
         continue
       }
 
-      const pool = vehicles.filter((v) => {
-        const deptOk = ignoreDepartment
-          ? true
-          : assm
-          ? v.category === 'ASSM' || v.category === ''
-          : v.category !== 'ASSM' || v.category === ''
-        const lengthOk =
-          v.lengthMm > 0
-            ? v.lengthMm >= needLenMm
-            : ignoreLengthIfMissing
-            ? true
-            : false
-        return (
-          deptOk &&
-          lengthOk &&
-          v.capacityAvailKg >= needKg &&
-          v.assignedCount < maxLoadsPerVehicle
-        )
-      })
+      const needKg = choice.needKg
+      assignedKg += needKg
 
-      if (!pool.length) {
-        totalUnassignedKg += needKg
+      if (choice.type === 'rigid') {
+        const r = choice.rigid
+        r.capacityAvailKg = Math.max(0, r.capacityAvailKg - needKg)
+        r.assignedCount += 1
+        for (const s of load.load_stops || [])
+          for (const o of s.load_orders || []) {
+            const c = (o.customer_name || '').trim().toUpperCase()
+            if (!trucksByCustomer.has(c)) trucksByCustomer.set(c, new Set())
+            trucksByCustomer.get(c).add(r.id)
+          }
         decisions.push({
           load_id: load.id,
-          route_id: load.route_id,
-          route_name: load.route_name,
-          branch_id: load.branch_id,
-          branch_name: load.branch_name,
-          required_kg: needKg,
-          required_length_mm: needLenMm,
-          ...(debug ? { longest_items: topItems } : {}),
-          reason: 'No vehicle meets capacity/length/department constraints',
+          vehicle: { type: 'RIGID', rigid_id: r.id },
+          needKg,
         })
-        continue
+      } else {
+        const h = choice.horse,
+          t = choice.trailer
+        t.capacityAvailKg = Math.max(0, t.capacityAvailKg - needKg)
+        t.assignedCount += 1
+        h.assignedCount += 1
+        for (const s of load.load_stops || [])
+          for (const o of s.load_orders || []) {
+            const c = (o.customer_name || '').trim().toUpperCase()
+            if (!trucksByCustomer.has(c)) trucksByCustomer.set(c, new Set())
+            trucksByCustomer.get(c).add(h.id)
+          }
+        decisions.push({
+          load_id: load.id,
+          vehicle: { type: 'COMBO', horse_id: h.id, trailer_id: t.id },
+          needKg,
+        })
       }
-
-      pool.sort((a, b) => {
-        const sa = scoreVehicle(a, needKg, needLenMm)
-        const sb = scoreVehicle(b, needKg, needLenMm)
-        if (sa !== sb) return sa - sb
-        const ra = a.capacityAvailKg - needKg
-        const rb = b.capacityAvailKg - needKg
-        if (ra !== rb) return ra - rb
-        return (b.priority || 0) - (a.priority || 0)
-      })
-
-      const chosen = pool[0]
-      chosen.capacityAvailKg -= needKg
-      chosen.assignedCount += 1
-      zones.forEach((z) => {
-        if (!zoneTruckMap.has(z)) zoneTruckMap.set(z, new Set())
-        zoneTruckMap.get(z).add(chosen.id)
-      })
-
-      totalAssignedKg += needKg
-      decisions.push({
-        load_id: load.id,
-        route_id: load.route_id,
-        route_name: load.route_name,
-        branch_id: load.branch_id,
-        branch_name: load.branch_name,
-        required_kg: needKg,
-        required_length_mm: needLenMm,
-        assm_load: assm,
-        vehicle_id: chosen.id,
-        vehicle_remaining_capacity_kg: Math.max(
-          0,
-          Math.round(chosen.capacityAvailKg)
-        ),
-        ...(debug ? { longest_items: topItems } : {}),
-      })
     }
 
     if (commit) {
-      const updates = decisions
-        .filter((d) => d.vehicle_id)
-        .map((d) => ({ id: d.load_id, vehicle_id: d.vehicle_id }))
-      for (const u of updates) {
-        const { error: updErr } = await database
-          .from('loads')
-          .update({ vehicle_id: u.vehicle_id })
-          .eq('id', u.id)
-        if (updErr) {
-          const d = decisions.find((x) => x.load_id === u.id)
-          if (d) d.commit_error = updErr.message
+      for (const d of decisions) {
+        if (!d.vehicle) continue
+        const loadId = d.load_id
+
+        if (d.vehicle.type === 'RIGID') {
+          const rigidId = d.vehicle.rigid_id
+          await database
+            .from('loads')
+            .update({ vehicle_id: rigidId })
+            .eq('id', loadId)
+          await setVehicleStatus(rigidId, 'assigned')
+          await logAssignment({
+            date,
+            load_id: loadId,
+            vehicle_id: rigidId,
+            role: 'rigid',
+            source: 'auto',
+          })
+        } else {
+          const horseId = d.vehicle.horse_id
+          const trailerId = d.vehicle.trailer_id
+          await database
+            .from('loads')
+            .update({ vehicle_id: horseId })
+            .eq('id', loadId)
+          await setVehicleStatus(horseId, 'assigned')
+          await setVehicleStatus(trailerId, 'assigned')
+          await logAssignment({
+            date,
+            load_id: loadId,
+            vehicle_id: horseId,
+            role: 'horse',
+            source: 'auto',
+          })
+          await logAssignment({
+            date,
+            load_id: loadId,
+            vehicle_id: trailerId,
+            role: 'trailer',
+            source: 'auto',
+          })
         }
       }
     }
 
-    // index loads by id so we can pull full detail for the manifest
-    const loadIndex = new Map()
-    for (const l of loads) loadIndex.set(l.id, l)
-
-    // group assigned by vehicle
-    const assignmentsByVehicle = {}
-    let assignmentsByLoad = {}
-    for (const d of decisions) {
-      const l = loadIndex.get(d.load_id)
-      const requiredLen = d.required_length_mm
-      const assmFlag = !!d.assm_load
-
-      if (d.vehicle_id) {
-        if (!assignmentsByVehicle[d.vehicle_id]) {
-          assignmentsByVehicle[d.vehicle_id] = {
-            vehicle_id: d.vehicle_id,
-            total_assigned_kg: 0,
-            assigned_load_count: 0,
-            loads: [],
-          }
+    return res.status(200).send(
+      new Response(
+        200,
+        'OK',
+        commit ? 'Auto-assignment committed' : 'Auto-assignment preview',
+        {
+          date,
+          totals: { assigned_kg: assignedKg, unassigned_kg: unassignedKg },
+          decisions,
         }
-        const m = buildLoadManifest(
-          l,
-          requiredLen,
-          assmFlag,
-          detailLevel,
-          maxItemsPerOrder
-        )
-        assignmentsByVehicle[d.vehicle_id].loads.push(m)
-        assignmentsByVehicle[d.vehicle_id].assigned_load_count += 1
-        assignmentsByVehicle[d.vehicle_id].total_assigned_kg += d.required_kg
-        assignmentsByLoad[d.load_id] = { vehicle_id: d.vehicle_id, ...m }
-      } else {
-        // unassigned – still include a detailed reasoned manifest
-        const m = buildLoadManifest(
-          l,
-          requiredLen,
-          assmFlag,
-          detailLevel,
-          maxItemsPerOrder
-        )
-        assignmentsByLoad[d.load_id] = {
-          vehicle_id: null,
-          reason: d.reason,
-          ...m,
-        }
-      }
-    }
-
-    // optional: attach basic vehicle metadata for the header row (friendly manifest)
-    const vehicleMeta = {}
-    if (debug) {
-      for (const v of vehicles) {
-        vehicleMeta[v.id] = {
-          category: v.category,
-          lengthMm: v.lengthMm,
-          capacityAvailKg: v.capacityAvailKg,
-        }
-      }
-    }
-
-    // const body = {
-    //   date,
-    //   totals: {
-    //     assigned_kg: totalAssignedKg,
-    //     unassigned_kg: totalUnassignedKg,
-    //   },
-    //   parameters: {
-    //     capacity_headroom: `${Math.round((capacityHeadroom || 0) * 100)}%`,
-    //     length_buffer_mm: Number(lengthBufferMm || 0),
-    //     zone_truck_cap: maxTrucksPerZone,
-    //     max_loads_per_vehicle: maxLoadsPerVehicle,
-    //     default_vehicle_capacity_kg: defaultVehicleCapacityKg,
-    //     default_vehicle_length_mm: defaultVehicleLengthMm,
-    //     ignore_length_if_missing: !!ignoreLengthIfMissing,
-    //     ignore_department: !!ignoreDepartment,
-    //   },
-    //   ...(debug ? { vehicle_pool_snapshot: vehicleSnapshot } : {}),
-    //   decisions,
-    // }
-    const body = {
-      date,
-      totals: {
-        assigned_kg: totalAssignedKg,
-        unassigned_kg: totalUnassignedKg,
-      },
-      // parameters: {
-      //   capacity_headroom: `${Math.round((capacityHeadroom || 0) * 100)}%`,
-      //   length_buffer_mm: Number(lengthBufferMm || 0),
-      //   zone_truck_cap: maxTrucksPerZone,
-      //   max_loads_per_vehicle: maxLoadsPerVehicle,
-      //   default_vehicle_capacity_kg: defaultVehicleCapacityKg,
-      //   default_vehicle_length_mm: defaultVehicleLengthMm,
-      //   ignore_length_if_missing: !!ignoreLengthIfMissing,
-      //   ignore_department: !!ignoreDepartment,
-      //   detail_level: detailLevel,
-      //   max_items_per_order: maxItemsPerOrder,
-      // },
-      // ...(debug
-      //   ? { vehicle_pool_snapshot: vehicleSnapshot, vehicle_meta: vehicleMeta }
-      //   : {}),
-      // decisions,
-      assignments_by_vehicle: Object.values(assignmentsByVehicle),
-      assignments_by_load: Object.values(assignmentsByLoad),
-      unassigned_details: decisions
-        .filter((d) => !d.vehicle_id)
-        .map((d) => assignmentsByLoad[d.load_id]), // already contains reason + manifest
-    }
-
-    const msg = commit
-      ? 'Auto-assignment committed (loads.vehicle_id updated)'
-      : 'Auto-assignment preview (no DB changes)'
-    return res.status(200).json(new Response(200, 'OK', msg, body))
+      )
+    )
   } catch (err) {
-    return res.status(500).json(new Response(500, 'Server Error', err.message))
+    return res.status(500).send(new Response(500, 'Server Error', err.message))
+  }
+}
+
+/** Manual assignment (no link mutations) */
+export const manuallyAssign = async (req, res) => {
+  try {
+    const { id } = req.params
+    const {
+      rigid_id,
+      horse_id,
+      trailer_id,
+      enforceSameBranch = true,
+      enforceDims = true,
+      capacityHeadroom = 0.1,
+      lengthBufferMm = 600,
+      widthBufferMm = 0,
+      allowCustomerCapOverride = false,
+    } = req.body || {}
+    const date = req.body?.date
+
+    if (!rigid_id && !(horse_id && trailer_id)) {
+      return res
+        .status(400)
+        .send(
+          new Response(
+            400,
+            'Bad Request',
+            'Provide either rigid_id OR both horse_id and trailer_id'
+          )
+        )
+    }
+
+    const { data: load, error: lerr } = await database
+      .from('loads_with_tree')
+      .select(
+        `id, branch_id, delivery_date, vehicle_id, load_stops ( load_orders ( customer_name, total_weight, load_items ( weight, length, description ) ) )`
+      )
+      .eq('id', id)
+      .single()
+    if (lerr || !load)
+      return res
+        .status(404)
+        .send(new Response(404, 'Not Found', 'Load not found'))
+    const theDate = date || load.delivery_date
+
+    const getV = async (vid) => {
+      const { data, error } = await database
+        .from('vehicles')
+        .select(
+          'id, branch_id, status, type, capacity, length, width, dimensions, assigned_to'
+        )
+        .eq('id', vid)
+        .single()
+      if (error) throw new Error(error.message)
+      return data
+    }
+
+    const needKg = needWeightKg(load)
+    const needLen = needMaxLengthMm(load) + Number(lengthBufferMm)
+    const needWid = needMaxWidthMm(load) + Number(widthBufferMm)
+
+    const trucksByCustomer = new Map()
+    const loadsSameDay = await fetchLoadsForDate({
+      date: theDate,
+      branch_id: load.branch_id,
+    })
+    seedCustomerCapFromLoads(loadsSameDay, trucksByCustomer)
+
+    if (rigid_id) {
+      const v = await getV(rigid_id)
+      if (String(v.status || '').toLowerCase() !== 'available') {
+        return res
+          .status(400)
+          .send(new Response(400, 'Bad Request', 'Rigid is not available'))
+      }
+      if (
+        enforceSameBranch &&
+        v.branch_id &&
+        load.branch_id &&
+        v.branch_id !== load.branch_id
+      ) {
+        return res
+          .status(400)
+          .send(
+            new Response(
+              400,
+              'Bad Request',
+              'Rigid belongs to different branch'
+            )
+          )
+      }
+      if (!allowCustomerCapOverride) {
+        const ok = respectsCustomerCap(v.id, load, trucksByCustomer, 2)
+        if (!ok)
+          return res
+            .status(409)
+            .send(
+              new Response(
+                409,
+                'Conflict',
+                'Customer already has two trucks for the date'
+              )
+            )
+      }
+      if (enforceDims) {
+        const capKg = parseCapacityToKg(v.capacity)
+        const lenMm =
+          parseLengthToMm(v.length) ||
+          parseDimsFromString(v.dimensions).lengthMm
+        const widMm =
+          parseLengthToMm(v.width) || parseDimsFromString(v.dimensions).widthMm
+        if (capKg < Math.ceil(needKg * (1 + Number(capacityHeadroom)))) {
+          return res
+            .status(400)
+            .send(new Response(400, 'Bad Request', 'Rigid capacity too low'))
+        }
+        if (!(lenMm && lenMm >= needLen))
+          return res
+            .status(400)
+            .send(new Response(400, 'Bad Request', 'Rigid length too short'))
+        if (widMm && widMm < needWid)
+          return res
+            .status(400)
+            .send(new Response(400, 'Bad Request', 'Rigid width too narrow'))
+      }
+      await database.from('loads').update({ vehicle_id: v.id }).eq('id', id)
+      await setVehicleStatus(v.id, 'assigned')
+      await logAssignment({
+        date: theDate,
+        load_id: id,
+        vehicle_id: v.id,
+        role: 'rigid',
+        source: 'manual',
+      })
+      return res.status(200).send(
+        new Response(200, 'OK', 'Rigid assigned', {
+          load_id: id,
+          vehicle_id: v.id,
+        })
+      )
+    }
+
+    const h = await getV(horse_id)
+    const t = await getV(trailer_id)
+    for (const obj of [
+      { v: h, name: 'Horse' },
+      { v: t, name: 'Trailer' },
+    ]) {
+      if (String(obj.v.status || '').toLowerCase() !== 'available') {
+        return res
+          .status(400)
+          .send(
+            new Response(400, 'Bad Request', `${obj.name} is not available`)
+          )
+      }
+    }
+    if (enforceSameBranch) {
+      const bset = new Set(
+        [h.branch_id, t.branch_id, load.branch_id].filter(Boolean)
+      )
+      if (bset.size > 1)
+        return res
+          .status(400)
+          .send(
+            new Response(
+              400,
+              'Bad Request',
+              'Horse/Trailer/Load must be in same branch'
+            )
+          )
+    }
+    if (t.assigned_to && t.assigned_to !== h.id) {
+      return res
+        .status(409)
+        .send(
+          new Response(
+            409,
+            'Conflict',
+            'Trailer is linked to a different horse. Adjust link in fleet admin before assignment.'
+          )
+        )
+    }
+    if (!allowCustomerCapOverride) {
+      const ok = respectsCustomerCap(h.id, load, trucksByCustomer, 2)
+      if (!ok)
+        return res
+          .status(409)
+          .send(
+            new Response(
+              409,
+              'Conflict',
+              'Customer already has two trucks for the date'
+            )
+          )
+    }
+    if (enforceDims) {
+      const capKg = parseCapacityToKg(t.capacity)
+      const lenMm =
+        parseLengthToMm(t.length) || parseDimsFromString(t.dimensions).lengthMm
+      const widMm =
+        parseLengthToMm(t.width) || parseDimsFromString(t.dimensions).widthMm
+      if (capKg < Math.ceil(needKg * (1 + Number(capacityHeadroom)))) {
+        return res
+          .status(400)
+          .send(new Response(400, 'Bad Request', 'Trailer capacity too low'))
+      }
+      if (!(lenMm && lenMm >= needLen))
+        return res
+          .status(400)
+          .send(new Response(400, 'Bad Request', 'Trailer length too short'))
+      if (widMm && widMm < needWid)
+        return res
+          .status(400)
+          .send(new Response(400, 'Bad Request', 'Trailer width too narrow'))
+    }
+
+    await database.from('loads').update({ vehicle_id: h.id }).eq('id', id)
+    await setVehicleStatus(h.id, 'assigned')
+    await setVehicleStatus(t.id, 'assigned')
+    await logAssignment({
+      date: theDate,
+      load_id: id,
+      vehicle_id: h.id,
+      role: 'horse',
+      source: 'manual',
+    })
+    await logAssignment({
+      date: theDate,
+      load_id: id,
+      vehicle_id: t.id,
+      role: 'trailer',
+      source: 'manual',
+    })
+
+    return res.status(200).send(
+      new Response(200, 'OK', 'Horse+Trailer assigned', {
+        load_id: id,
+        horse_id: h.id,
+        trailer_id: t.id,
+      })
+    )
+  } catch (err) {
+    return res.status(500).send(new Response(500, 'Server Error', err.message))
+  }
+}
+
+/** Unassign with safe status flip */
+export const unassign = async (req, res) => {
+  try {
+    const { id } = await req.params
+    const date = req.body?.date
+    console.log('id :>> ', { ...req.params })
+    console.log('date :>> ', date)
+
+    const { data: load, error: lerr } = await database
+      .from('loads')
+      .select('id, vehicle_id, delivery_date')
+      .eq('id', id)
+      .single()
+    if (lerr || !load)
+      return res
+        .status(404)
+        .send(new Response(404, 'Not Found', 'Load not found'))
+    const theDate = date || load.delivery_date
+
+    const { data: assigns, error: aerr } = await database
+      .from('vehicle_assignments')
+      .select('vehicle_id, role')
+      .eq('assignment_date', theDate)
+      .eq('load_id', id)
+    if (aerr)
+      return res
+        .status(400)
+        .send(new Response(400, 'Bad Request', aerr.message))
+
+    // delete assignment rows
+    await database
+      .from('vehicle_assignments')
+      .delete()
+      .eq('assignment_date', theDate)
+      .eq('load_id', id)
+
+    // after deletion, flip status to available only if no other assignments for the date
+    const vehIds = Array.from(new Set((assigns || []).map((r) => r.vehicle_id)))
+    for (const vid of vehIds) {
+      const { data: remain, error: rerr } = await database
+        .from('vehicle_assignments')
+        .select('id')
+        .eq('assignment_date', theDate)
+        .eq('vehicle_id', vid)
+        .limit(1)
+      if (!rerr && (!remain || remain.length === 0)) {
+        await database
+          .from('vehicles')
+          .update({ status: 'available' })
+          .eq('id', vid)
+      }
+    }
+
+    await database.from('loads').update({ vehicle_id: null }).eq('id', id)
+
+    return res
+      .status(200)
+      .send(new Response(200, 'OK', 'Unassigned', { load_id: id }))
+  } catch (err) {
+    return res.status(500).send(new Response(500, 'Server Error', err.message))
+  }
+}
+
+/** GET /api/vehicle-assignments?date=YYYY-MM-DD */
+export const getVehicleAssignmentsByDate = async (req, res) => {
+  try {
+    const { date } = req.query
+    if (!date)
+      return res
+        .status(400)
+        .send(new Response(400, 'Bad Request', 'date is required'))
+    const { data, error } = await database
+      .from('vehicle_assignments')
+      .select('assignment_date, load_id, vehicle_id, role, source, created_at')
+      .eq('assignment_date', date)
+      .order('created_at', { ascending: true })
+    if (error)
+      return res
+        .status(500)
+        .send(new Response(500, 'Server Error', error.message))
+    return res.status(200).send(new Response(200, 'OK', 'Assignments', data))
+  } catch (err) {
+    return res.status(500).send(new Response(500, 'Server Error', err.message))
   }
 }
