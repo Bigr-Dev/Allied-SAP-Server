@@ -66,7 +66,9 @@ import {
   // unassign,
 } from '../controllers/autoAssignment-controller.js'
 import {
+  addIdleUnit,
   autoAssignLoads,
+  getAllPlans,
   getFullPlan,
   getPlanById,
   manuallyAssign,
@@ -165,18 +167,66 @@ router.get('/grouped-routes', apiClientAuth, getGroupedRoutes)
  */
 router.get('/grouped-routes/items', apiClientAuth, getAllItemsWithContext)
 
-// vehicle assignment
-//router.post('/auto-assign', apiClientAuth, autoAssign)
-//router.post('/assignments/:planId/unassign/:assignmentId', async (req, res) => {
-//router.post('/assignments/:planId/unassign-all', async (req, res) => {
-// router.get('/assignments/:planId/unit/:unitId',
-//router.get('/vehicle-assignments', apiClientAuth, getVehicleAssignmentsByDate)
-// assignment planner
+// ───────────────────────────────────────────────────────────────────────────────
+// AUTO-ASSIGN (preview or commit)
+// POST /plans/auto-assign
+// Notes:
+//  - commit=false (default) ⇒ preview only
+//  - commit=true  ⇒ writes plan, units & assignments
+//router.post('/plans/auto-assign', apiClientAuth, autoAssignLoads)
 router.post('/auto-assign-loads', apiClientAuth, autoAssignLoads)
-router.post('/manual-assign/:id', apiClientAuth, manuallyAssign)
-router.post('/unassign/:id', apiClientAuth, unassign)
-router.post('/unassign-all/:planId', apiClientAuth, unassignAll)
-router.get('/assignments/:planId', apiClientAuth, getFullPlan)
-router.get('/assignments/:planId/unit/:unitId', apiClientAuth, getPlanById)
+// (Optional legacy alias to avoid breaking existing clients)
+// router.post('/auto-assign-loads', apiClientAuth, autoAssignLoads)
+
+// ───────────────────────────────────────────────────────────────────────────────
+// GET all plans (with optional filters/pagination)
+router.get('/plans', apiClientAuth, getAllPlans)
+
+// ───────────────────────────────────────────────────────────────────────────────
+// ADD AN IDLE VEHICLE INTO A PLAN
+// POST /plans/:planId/units
+// Body can specify either `unit_key` (from idle_units_by_branch) or explicit IDs.
+// Optionally assign items immediately via `assign_items`.
+router.post('/plans/:planId/units', apiClientAuth, addIdleUnit)
+
+// ───────────────────────────────────────────────────────────────────────────────
+// MANUAL ASSIGN AN ITEM TO AN EXISTING PLAN UNIT
+// POST /plans/:planId/units/:unitId/assign
+router.post(
+  '/plans/:planId/units/:unitId/assign',
+  apiClientAuth,
+  manuallyAssign
+)
+
+// ───────────────────────────────────────────────────────────────────────────────
+// UNASSIGN A SINGLE ASSIGNMENT
+// DELETE /plans/:planId/assignments/:assignmentId
+router.delete(
+  '/plans/:planId/assignments/:assignmentId',
+  apiClientAuth,
+  unassign
+)
+
+// (If you prefer POST semantics, keep this alias too)
+// router.post('/unassign/:planId/:assignmentId', apiClientAuth, unassign)
+
+// ───────────────────────────────────────────────────────────────────────────────
+// UNASSIGN ALL ITEMS IN A PLAN (keeps the plan & units)
+// POST /plans/:planId/assignments/unassign-all
+router.post(
+  '/plans/:planId/assignments/unassign-all',
+  apiClientAuth,
+  unassignAll
+)
+
+// ───────────────────────────────────────────────────────────────────────────────
+// GET FULL PLAN SNAPSHOT (units, assignments, unassigned bucket)
+// GET /plans/:planId
+router.get('/plans/:planId', apiClientAuth, getFullPlan)
+
+// ───────────────────────────────────────────────────────────────────────────────
+// GET A SINGLE UNIT WITHIN A PLAN
+// GET /plans/:planId/units/:unitId
+router.get('/plans/:planId/units/:unitId', apiClientAuth, getPlanById)
 
 export default router

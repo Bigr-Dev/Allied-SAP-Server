@@ -15,6 +15,14 @@ function parseMetersToMm(raw) {
   return Number.isFinite(val) ? Math.max(0, Math.round(val * 1000)) : 0
 }
 
+function sumWeightsByUnitIdx(placements) {
+  const m = new Map()
+  for (const p of placements) {
+    m.set(p.unitIdx, (m.get(p.unitIdx) || 0) + Number(p.weight || 0))
+  }
+  return m
+}
+
 /** Extract a macro route group from a route name, e.g. "EAST RAND 04" -> "EAST RAND", "VAAL 02" -> "VAAL". */
 
 /** Normalise common typos/joins/hyphens and whitespace */
@@ -276,12 +284,42 @@ function isAssmItem(/* item */) {
   return false
 }
 
-/** Build geo/zone keys (use suburb_name first, then route_name) */
-function zoneKeysForItem(item) {
-  const base =
-    item?.route_group || item?.route_name || item?.suburb_name || 'UNKNOWN'
-  return [safeUpper(base).replace(/\s+/g, '')]
+// Cap logic selector (kept for clarity; we default to 'client')
+const ZONE_CAP_MODE = 'client'
+
+// normalise any key into a compact uppercase token
+function normKey(x) {
+  return String(x || 'UNKNOWN')
+    .toUpperCase()
+    .trim()
+    .replace(/\s+/g, '')
 }
+
+/**
+ * Zone key(s) for capping. We cap by CLIENT first; when customer is missing,
+ * we fall back to route_name. This yields a single-zone key per item.
+ */
+function zoneKeysForItem(item) {
+  if (ZONE_CAP_MODE === 'client') {
+    if (item?.customer_id != null) {
+      return [`CLIENT:${normKey(item.customer_id)}`]
+    }
+    // Fallback when no customer_id
+    const route = item?.route_name || item?.route_group || item?.suburb_name
+    return [`ROUTE:${normKey(route)}`]
+  }
+
+  // (Other modes left here for future use)
+  const route = item?.route_name || item?.route_group || item?.suburb_name
+  return [`ROUTE:${normKey(route)}`]
+}
+
+/** Build geo/zone keys (use suburb_name first, then route_name) */
+// function zoneKeysForItem(item) {
+//   const base =
+//     item?.route_group || item?.route_name || item?.suburb_name || 'UNKNOWN'
+//   return [safeUpper(base).replace(/\s+/g, '')]
+// }
 // function zoneKeysForItem(item) {
 //   const base = item?.suburb_name || item?.route_name || 'UNKNOWN'
 //   return [safeUpper(base).replace(/\s+/g, '')]
@@ -422,28 +460,106 @@ async function fetchPlanUnits(planId) {
   return data || []
 }
 
+// Fetch assignments for a plan and enrich with display fields.
+
+// No RPCs; uses standard selects and merges in JS.
 async function fetchPlanAssignments(planId) {
-  // If you don't have exec_sql, replace with a view or multi-selects.
-  const { data, error } = await database.rpc('exec_sql', {
-    query: `
-      select
-        a.id as assignment_id,
-        u.id as plan_unit_id,
-        a.load_id, a.order_id, a.item_id,
-        a.assigned_weight_kg,
-        a.priority_note,
-        ui.customer_id, ui.customer_name, ui.suburb_name, ui.route_name, ui.order_date, ui.description
-      from public.assignment_plan_item_assignments a
-      join public.assignment_plan_units u on u.id = a.plan_unit_id
-      left join public.v_unassigned_items ui on ui.item_id = a.item_id
-      where u.plan_id = $1
-      order by ui.order_date asc, a.id asc
-    `,
-    params: [planId],
+  // 1) Get plan_unit ids for this plan
+  const { data: unitRows, error: unitErr } = await database
+    .from('assignment_plan_units')
+    .select('id')
+    .eq('plan_id', planId)
+  if (unitErr) throw unitErr
+  const unitIds = (unitRows || []).map((r) => r.id)
+  if (!unitIds.length) return []
+
+  // 2) Get assignments for those units
+  const { data: assigns, error: aErr } = await database
+    .from('assignment_plan_item_assignments')
+    .select(
+      'id,plan_unit_id,load_id,order_id,item_id,assigned_weight_kg,priority_note'
+    )
+    .in('plan_unit_id', unitIds)
+    .order('id', { ascending: true })
+  if (aErr) throw aErr
+  if (!assigns?.length) return []
+
+  // 3) Enrich with display fields from v_unassigned_items (left-join semantics)
+  //    Note: once items are assigned, they may no longer appear in this view—fields will be null.
+  const itemIds = Array.from(
+    new Set(assigns.map((a) => a.item_id).filter(Boolean))
+  )
+  let itemMap = new Map()
+  if (itemIds.length) {
+    // chunk IN() if you expect very large plans
+    const CHUNK = 1000
+    let rows = []
+    for (let i = 0; i < itemIds.length; i += CHUNK) {
+      const slice = itemIds.slice(i, i + CHUNK)
+      const { data: part, error: iErr } = await database
+        .from('v_unassigned_items')
+        .select(
+          'item_id,customer_id,customer_name,suburb_name,route_name,order_date,description'
+        )
+        .in('item_id', slice)
+      if (iErr) throw iErr
+      rows = rows.concat(part || [])
+    }
+    itemMap = new Map(rows.map((r) => [r.item_id, r]))
+  }
+
+  // 4) Merge and sort (order_date asc, then id asc)
+  const merged = assigns.map((a) => {
+    const ui = itemMap.get(a.item_id) || {}
+    return {
+      assignment_id: a.id,
+      plan_unit_id: a.plan_unit_id,
+      load_id: a.load_id,
+      order_id: a.order_id,
+      item_id: a.item_id,
+      assigned_weight_kg: a.assigned_weight_kg,
+      priority_note: a.priority_note,
+      customer_id: ui.customer_id ?? null,
+      customer_name: ui.customer_name ?? null,
+      suburb_name: ui.suburb_name ?? null,
+      route_name: ui.route_name ?? null,
+      order_date: ui.order_date ?? null,
+      description: ui.description ?? null,
+    }
   })
-  if (error) throw error
-  return data || []
+
+  merged.sort((x, y) => {
+    const a = x.order_date || ''
+    const b = y.order_date || ''
+    if (a !== b) return String(a).localeCompare(String(b))
+    return Number(x.assignment_id) - Number(y.assignment_id)
+  })
+
+  return merged
 }
+
+// async function fetchPlanAssignments(planId) {
+//   // If you don't have exec_sql, replace with a view or multi-selects.
+//   const { data, error } = await database.rpc('exec_sql', {
+//     query: `
+//       select
+//         a.id as assignment_id,
+//         u.id as plan_unit_id,
+//         a.load_id, a.order_id, a.item_id,
+//         a.assigned_weight_kg,
+//         a.priority_note,
+//         ui.customer_id, ui.customer_name, ui.suburb_name, ui.route_name, ui.order_date, ui.description
+//       from public.assignment_plan_item_assignments a
+//       join public.assignment_plan_units u on u.id = a.plan_unit_id
+//       left join public.v_unassigned_items ui on ui.item_id = a.item_id
+//       where u.plan_id = $1
+//       order by ui.order_date asc, a.id asc
+//     `,
+//     params: [planId],
+//   })
+//   if (error) throw error
+//   return data || []
+// }
 
 async function fetchUnassignedBucket(planId) {
   const { data, error } = await database
@@ -952,6 +1068,66 @@ function packItemsIntoUnits(
 
 /* ============================== endpoints ============================== */
 
+// List plans from the assignment_plans table
+// GET /plans
+// Query params (all optional):
+//   - limit: number (default 50)
+//   - offset: number (default 0)
+//   - order: 'asc' | 'desc' (default 'desc')  → applied to departure_date then run_at
+//   - date_from: 'YYYY-MM-DD'  → departure_date >= date_from
+//   - date_to:   'YYYY-MM-DD'  → departure_date <= date_to
+//   - branch_id: filter by scope_branch_id (UUID)
+//   - customer_id: filter by scope_customer_id (UUID)
+export const getAllPlans = async (req, res) => {
+  try {
+    const {
+      limit = 50,
+      offset = 0,
+      order = 'desc',
+      date_from,
+      date_to,
+      branch_id,
+      customer_id,
+    } = req.query || {}
+
+    let q = database
+      .from('assignment_plans')
+      .select(
+        'id, run_at, departure_date, cutoff_date, scope_branch_id, scope_customer_id, notes',
+        { count: 'exact' }
+      )
+
+    if (branch_id) q = q.eq('scope_branch_id', branch_id)
+    if (customer_id) q = q.eq('scope_customer_id', customer_id)
+    if (date_from) q = q.gte('departure_date', date_from)
+    if (date_to) q = q.lte('departure_date', date_to)
+
+    const asc = String(order).toLowerCase() === 'asc'
+    q = q
+      .order('departure_date', { ascending: asc, nullsFirst: asc })
+      .order('run_at', { ascending: asc, nullsFirst: asc })
+
+    // pagination
+    const start = Number(offset) || 0
+    const end = start + (Number(limit) || 50) - 1
+    q = q.range(start, Math.max(start, end))
+
+    const { data, error, count } = await q
+    if (error) throw error
+
+    return res.status(200).json(
+      new Response(200, 'OK', 'Plans fetched', {
+        total: typeof count === 'number' ? count : data?.length || 0,
+        limit: Number(limit),
+        offset: Number(offset),
+        plans: data || [],
+      })
+    )
+  } catch (err) {
+    return res.status(500).json(new Response(500, 'Server Error', err.message))
+  }
+}
+
 /**
  * AUTO (preview or commit)
  * Body:
@@ -1080,10 +1256,13 @@ export const autoAssignLoads = async (req, res) => {
 
     if (!commit) {
       // ephemeral preview
-      const used = Array.from(new Set(placements.map((p) => p.unitIdx)))
+      // Build from actual placements
+      const weightByIdx = sumWeightsByUnitIdx(placements)
+      const used = Array.from(weightByIdx.keys()) // only units that truly have at least one item
+
       const pseudoUnits = used.map((idx, i) => {
         const u = shapedUnits[idx]
-        const st = state[idx]
+        const usedKg = weightByIdx.get(idx) || 0
         return {
           plan_unit_id: `preview-${i}`,
           unit_type: u.unit_type,
@@ -1099,10 +1278,7 @@ export const autoAssignLoads = async (req, res) => {
           trailer_plate: u.trailer_plate,
           trailer_fleet: u.trailer_fleet,
           capacity_kg: Number(u.capacity_kg),
-          used_capacity_kg: Math.max(
-            0,
-            Number(u.capacity_kg) - Number(st.capacity_left)
-          ),
+          used_capacity_kg: Number(usedKg.toFixed(3)), // <- robust, from placements
         }
       })
 
@@ -1125,6 +1301,52 @@ export const autoAssignLoads = async (req, res) => {
           description: i.description,
         }
       })
+
+      // const used = Array.from(new Set(placements.map((p) => p.unitIdx)))
+      // const pseudoUnits = used.map((idx, i) => {
+      //   const u = shapedUnits[idx]
+      //   const st = state[idx]
+      //   return {
+      //     plan_unit_id: `preview-${i}`,
+      //     unit_type: u.unit_type,
+      //     driver_id: u.driver_id,
+      //     driver_name: u.driver_name,
+      //     rigid_id: u.rigid_id,
+      //     rigid_plate: u.rigid_plate,
+      //     rigid_fleet: u.rigid_fleet,
+      //     horse_id: u.horse_id,
+      //     horse_plate: u.horse_plate,
+      //     horse_fleet: u.horse_fleet,
+      //     trailer_id: u.trailer_id,
+      //     trailer_plate: u.trailer_plate,
+      //     trailer_fleet: u.trailer_fleet,
+      //     capacity_kg: Number(u.capacity_kg),
+      //     used_capacity_kg: Math.max(
+      //       0,
+      //       Number(u.capacity_kg) - Number(st.capacity_left)
+      //     ),
+      //   }
+      // })
+
+      // const pseudoAssignments = placements.map((p) => {
+      //   const ordinal = used.indexOf(p.unitIdx)
+      //   const i = p.item
+      //   return {
+      //     assignment_id: `preview-${p.unitIdx}-${i.item_id}`,
+      //     plan_unit_id: `preview-${ordinal}`,
+      //     load_id: i.load_id,
+      //     order_id: i.order_id,
+      //     item_id: i.item_id,
+      //     assigned_weight_kg: p.weight,
+      //     priority_note: 'auto',
+      //     customer_id: i.customer_id,
+      //     customer_name: i.customer_name,
+      //     suburb_name: i.suburb_name,
+      //     route_name: i.route_name,
+      //     order_date: i.order_date,
+      //     description: i.description,
+      //   }
+      // })
 
       const bucket = unplaced.map((u) => ({
         load_id: u.load_id,
@@ -1185,7 +1407,14 @@ export const autoAssignLoads = async (req, res) => {
     const plan = planIns.data
 
     // create plan units (only used ones)
-    const usedIdx = Array.from(new Set(placements.map((p) => p.unitIdx)))
+    const weightByIdx = sumWeightsByUnitIdx(placements)
+    // const usedIdx = Array.from(weightByIdx.keys()) // only units that actually got items
+    const EPS = 1e-3
+    const usedIdx = Array.from(weightByIdx.entries())
+      .filter(([, w]) => w > EPS)
+      .map(([idx]) => idx)
+
+    // const usedIdx = Array.from(new Set(placements.map((p) => p.unitIdx)))
     const planUnitIdByIdx = new Map()
     for (const idx of usedIdx) {
       const u = shapedUnits[idx]
@@ -1527,6 +1756,263 @@ export const autoAssignLoads = async (req, res) => {
 //     return res.status(500).json(new Response(500, 'Server Error', err.message))
 //   }
 // }
+
+/** Add an idle vehicle to a plan (and optionally assign items to it) */
+export const addIdleUnit = async (req, res) => {
+  try {
+    const { planId } = req.params
+    const {
+      // choose ONE of the following ways to identify the vehicle:
+      // 1) unit_key from idle_units_by_branch: "rigid:123" or "horse:45|trailer:78"
+      unit_key,
+
+      // 2) or explicit fields:
+      unit_type, // 'rigid' | 'horse+trailer'
+      rigid_id = null,
+      horse_id = null,
+      trailer_id = null,
+
+      // optional immediate assignments: [{ item_id, weight_kg?, note? }]
+      assign_items = [],
+    } = req.body || {}
+
+    // ---- parse unit_key if present ----
+    let utype = unit_type
+    let rid = rigid_id,
+      hid = horse_id,
+      tid = trailer_id
+
+    if (unit_key && !utype) {
+      if (unit_key.startsWith('rigid:')) {
+        utype = 'rigid'
+        rid = unit_key.split(':')[1]
+      } else if (unit_key.startsWith('horse:')) {
+        utype = 'horse+trailer'
+        const m = unit_key.match(/^horse:(.+)\|trailer:(.+)$/)
+        if (m) {
+          hid = m[1]
+          tid = m[2]
+        }
+      }
+    }
+
+    // ---- validate input ----
+    if (!planId) {
+      return res
+        .status(400)
+        .json(new Response(400, 'Bad Request', 'planId required'))
+    }
+    if (utype !== 'rigid' && utype !== 'horse+trailer') {
+      return res
+        .status(400)
+        .json(
+          new Response(
+            400,
+            'Bad Request',
+            'unit_type must be "rigid" or "horse+trailer"'
+          )
+        )
+    }
+    if (utype === 'rigid' && !rid) {
+      return res
+        .status(400)
+        .json(
+          new Response(400, 'Bad Request', 'rigid_id required for rigid unit')
+        )
+    }
+    if (utype === 'horse+trailer' && (!hid || !tid)) {
+      return res
+        .status(400)
+        .json(
+          new Response(
+            400,
+            'Bad Request',
+            'horse_id and trailer_id required for horse+trailer unit'
+          )
+        )
+    }
+
+    // ---- fetch the matching row from v_dispatch_units ----
+    let q = database.from('v_dispatch_units').select('*').eq('unit_type', utype)
+    if (utype === 'rigid') q = q.eq('rigid_id', rid)
+    else q = q.eq('horse_id', hid).eq('trailer_id', tid)
+    const { data: viewUnits, error: viewErr } = await q
+    if (viewErr) throw viewErr
+    const src = (viewUnits && viewUnits[0]) || null
+    if (!src) {
+      return res
+        .status(404)
+        .json(
+          new Response(
+            404,
+            'Not Found',
+            'Vehicle not found in v_dispatch_units'
+          )
+        )
+    }
+
+    // ---- avoid duplicates: already in this plan? ----
+    const { data: existing } = await database
+      .from('assignment_plan_units')
+      .select('id')
+      .eq('plan_id', planId)
+      .eq('unit_type', utype)
+      .eq('rigid_id', utype === 'rigid' ? rid : null)
+      .eq('horse_id', utype === 'horse+trailer' ? hid : null)
+      .eq('trailer_id', utype === 'horse+trailer' ? tid : null)
+      .limit(1)
+    if (existing && existing.length) {
+      return res.status(200).json(
+        new Response(200, 'OK', 'Unit already on plan', {
+          plan_unit_id: existing[0].id,
+        })
+      )
+    }
+
+    // ---- hydrate length/category/priority from vehicles (same rules as fetchUnits) ----
+    const vehIds = []
+    if (src.rigid_id) vehIds.push(src.rigid_id)
+    if (src.horse_id) vehIds.push(src.horse_id)
+    if (src.trailer_id) vehIds.push(src.trailer_id)
+
+    const { data: vehs, error: vehErr } = await database
+      .from('vehicles')
+      .select('id,length,priority,geozone,vehicle_category')
+      .in('id', vehIds)
+    if (vehErr) throw vehErr
+    const vmap = new Map((vehs || []).map((v) => [v.id, v]))
+
+    const parseMetersToMm = (raw) => {
+      if (raw == null) return 0
+      const s = String(raw).trim().replace(',', '.')
+      const val = parseFloat(s)
+      return Number.isFinite(val) ? Math.max(0, Math.round(val * 1000)) : 0
+    }
+
+    const lTrailer =
+      src.trailer_id && vmap.get(src.trailer_id)
+        ? parseMetersToMm(vmap.get(src.trailer_id).length)
+        : 0
+    const lRigid =
+      src.rigid_id && vmap.get(src.rigid_id)
+        ? parseMetersToMm(vmap.get(src.rigid_id).length)
+        : 0
+    const lHorse =
+      src.horse_id && vmap.get(src.horse_id)
+        ? parseMetersToMm(vmap.get(src.horse_id).length)
+        : 0
+    const length_mm =
+      utype === 'horse+trailer' && lTrailer
+        ? lTrailer
+        : utype === 'rigid' && lRigid
+        ? lRigid
+        : Math.max(lTrailer, lRigid, lHorse, 0)
+
+    const priority = Math.max(
+      ...[src.trailer_id, src.horse_id, src.rigid_id].map(
+        (id) => (id && Number(vmap.get(id)?.priority)) || -Infinity
+      )
+    )
+    const priority_safe = Number.isFinite(priority) ? priority : 0
+
+    const category = ['ASSM'].includes(
+      String(
+        vmap.get(src.trailer_id)?.geozone ||
+          vmap.get(src.horse_id)?.geozone ||
+          vmap.get(src.rigid_id)?.geozone ||
+          ''
+      ).toUpperCase()
+    )
+      ? 'ASSM'
+      : ''
+
+    // ---- insert the plan unit ----
+    const ins = await database
+      .from('assignment_plan_units')
+      .insert([
+        {
+          plan_id: planId,
+          unit_type: src.unit_type,
+          rigid_id: src.rigid_id,
+          trailer_id: src.trailer_id,
+          horse_id: src.horse_id,
+          driver_id: src.driver_id,
+          driver_name: src.driver_name,
+          rigid_plate: src.rigid_plate,
+          rigid_fleet: src.rigid_fleet,
+          horse_plate: src.horse_plate,
+          horse_fleet: src.horse_fleet,
+          trailer_plate: src.trailer_plate,
+          trailer_fleet: src.trailer_fleet,
+          capacity_kg: src.capacity_kg,
+          priority: priority_safe,
+          branch_id: src.branch_id || null,
+          category,
+          length_mm,
+        },
+      ])
+      .select('*')
+      .single()
+    if (ins.error) throw ins.error
+
+    const planUnitId = ins.data.id
+
+    // ---- optional: assign items immediately ----
+    if (assign_items && assign_items.length) {
+      // fetch missing weights for items that didn't provide weight_kg
+      const needWeightsFor = assign_items
+        .filter((x) => x.weight_kg == null)
+        .map((x) => x.item_id)
+      let weightByItem = new Map()
+      if (needWeightsFor.length) {
+        const { data: itemRows, error: itemsErr } = await database
+          .from('v_unassigned_items')
+          .select('item_id, weight_kg')
+          .in('item_id', needWeightsFor)
+        if (itemsErr) throw itemsErr
+        weightByItem = new Map(
+          itemRows.map((r) => [r.item_id, Number(r.weight_kg || 0)])
+        )
+      }
+
+      const rows = assign_items.map((x) => ({
+        plan_unit_id: planUnitId,
+        item_id: x.item_id,
+        assigned_weight_kg: Number(
+          x.weight_kg ?? weightByItem.get(x.item_id) ?? 0
+        ),
+        priority_note: x.note || 'manual',
+      }))
+      if (rows.length) {
+        const insA = await database
+          .from('assignment_plan_item_assignments')
+          .insert(rows)
+        if (insA.error) throw insA.error
+      }
+      await database
+        .rpc('recalc_plan_used_capacity', { p_plan_id: planId })
+        .catch(() => {})
+    }
+
+    // ---- return updated plan snapshot ----
+    const unitsDb = await fetchPlanUnits(planId)
+    const assignsDb = await fetchPlanAssignments(planId)
+    const bucket = await fetchUnassignedBucket(planId)
+    return res.status(200).json(
+      new Response(
+        200,
+        'OK',
+        assign_items?.length ? 'Unit added and items assigned' : 'Unit added',
+        {
+          plan_unit_id: planUnitId,
+          ...buildNested(unitsDb, assignsDb, bucket),
+        }
+      )
+    )
+  } catch (err) {
+    return res.status(500).json(new Response(500, 'Server Error', err.message))
+  }
+}
 
 /** MANUAL assign a single item to a unit */
 export const manuallyAssign = async (req, res) => {
