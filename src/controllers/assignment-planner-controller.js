@@ -1071,13 +1071,14 @@ function packItemsIntoUnits(
 // List plans from the assignment_plans table
 // GET /plans
 // Query params (all optional):
-//   - limit: number (default 50)
-//   - offset: number (default 0)
-//   - order: 'asc' | 'desc' (default 'desc')  → applied to departure_date then run_at
-//   - date_from: 'YYYY-MM-DD'  → departure_date >= date_from
-//   - date_to:   'YYYY-MM-DD'  → departure_date <= date_to
-//   - branch_id: filter by scope_branch_id (UUID)
-//   - customer_id: filter by scope_customer_id (UUID)
+//   limit, offset, order ('asc'|'desc'; default 'desc')
+//   date_from, date_to  (filter on departure_date)
+//   branch_id, customer_id
+//   include_units=true             -> attach plan_unit_ids per plan
+//   include_counts=true            -> attach units_count and assignments_count
+//   include_branch_name=true       -> attach scope_branch_name
+//   ids=<comma-separated UUIDs>    -> fetch only these plan IDs (order preserved by run_at desc)
+
 export const getAllPlans = async (req, res) => {
   try {
     const {
@@ -1088,7 +1089,15 @@ export const getAllPlans = async (req, res) => {
       date_to,
       branch_id,
       customer_id,
+      include_units,
+      include_counts,
+      include_branch_name,
+      ids,
     } = req.query || {}
+
+    const wantUnits = String(include_units).toLowerCase() === 'true'
+    const wantCounts = String(include_counts).toLowerCase() === 'true'
+    const wantBranchN = String(include_branch_name).toLowerCase() === 'true'
 
     let q = database
       .from('assignment_plans')
@@ -1096,6 +1105,14 @@ export const getAllPlans = async (req, res) => {
         'id, run_at, departure_date, cutoff_date, scope_branch_id, scope_customer_id, notes',
         { count: 'exact' }
       )
+
+    if (ids) {
+      const arr = ids
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+      if (arr.length) q = q.in('id', arr)
+    }
 
     if (branch_id) q = q.eq('scope_branch_id', branch_id)
     if (customer_id) q = q.eq('scope_customer_id', customer_id)
@@ -1112,15 +1129,97 @@ export const getAllPlans = async (req, res) => {
     const end = start + (Number(limit) || 50) - 1
     q = q.range(start, Math.max(start, end))
 
-    const { data, error, count } = await q
+    const { data: plans, error, count } = await q
     if (error) throw error
+    const plansOut = plans || []
+
+    // ---- Optional enrichments ----
+    let branchNameById = new Map()
+    if (wantBranchN) {
+      try {
+        const { data: rows } = await database.from('branches').select('id,name')
+        if (rows?.length)
+          branchNameById = new Map(rows.map((b) => [String(b.id), b.name]))
+      } catch (_) {}
+    }
+
+    let unitsByPlan = new Map()
+    let countsByPlan = new Map()
+
+    if (wantUnits || wantCounts) {
+      const planIds = plansOut.map((p) => p.id)
+      if (planIds.length) {
+        // fetch plan units
+        const { data: pu, error: puErr } = await database
+          .from('assignment_plan_units')
+          .select('id, plan_id')
+          .in('plan_id', planIds)
+        if (puErr) throw puErr
+
+        if (wantUnits) {
+          for (const r of pu || []) {
+            const arr = unitsByPlan.get(r.plan_id) || []
+            arr.push(r.id)
+            unitsByPlan.set(r.plan_id, arr)
+          }
+        }
+
+        if (wantCounts) {
+          // unit counts
+          const unitsCount = new Map()
+          for (const r of pu || []) {
+            unitsCount.set(r.plan_id, (unitsCount.get(r.plan_id) || 0) + 1)
+          }
+
+          // assignment counts
+          const puIds = (pu || []).map((r) => r.id)
+          let assignsCount = new Map()
+          if (puIds.length) {
+            const { data: asn, error: asnErr } = await database
+              .from('assignment_plan_item_assignments')
+              .select('plan_unit_id', { count: 'exact', head: false })
+              .in('plan_unit_id', puIds)
+            if (asnErr) throw asnErr
+            // count per plan via their plan_unit_id -> plan_id
+            const planByPU = new Map(pu.map((r) => [r.id, r.plan_id]))
+            for (const a of asn || []) {
+              const pid = planByPU.get(a.plan_unit_id)
+              if (!pid) continue
+              assignsCount.set(pid, (assignsCount.get(pid) || 0) + 1)
+            }
+          }
+
+          for (const pid of planIds) {
+            countsByPlan.set(pid, {
+              units_count: unitsCount.get(pid) || 0,
+              assignments_count: assignsCount.get(pid) || 0,
+            })
+          }
+        }
+      }
+    }
+
+    // shape final payload
+    const augmented = plansOut.map((p) => ({
+      ...p,
+      ...(wantBranchN
+        ? {
+            scope_branch_name:
+              branchNameById.get(String(p.scope_branch_id || '')) || null,
+          }
+        : {}),
+      ...(wantUnits ? { plan_unit_ids: unitsByPlan.get(p.id) || [] } : {}),
+      ...(wantCounts
+        ? countsByPlan.get(p.id) || { units_count: 0, assignments_count: 0 }
+        : {}),
+    }))
 
     return res.status(200).json(
       new Response(200, 'OK', 'Plans fetched', {
-        total: typeof count === 'number' ? count : data?.length || 0,
+        total: typeof count === 'number' ? count : plansOut.length || 0,
         limit: Number(limit),
         offset: Number(offset),
-        plans: data || [],
+        plans: augmented,
       })
     )
   } catch (err) {
