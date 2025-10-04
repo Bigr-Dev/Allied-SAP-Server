@@ -173,9 +173,9 @@ router.get('/grouped-routes/items', apiClientAuth, getAllItemsWithContext)
 //router.get('/vehicle-assignments', apiClientAuth, getVehicleAssignmentsByDate)
 // assignment planner
 router.post('/auto-assign-loads', apiClientAuth, autoAssignLoads)
-router.post('/manual-assign', apiClientAuth, manuallyAssign)
-router.post('/unassign', apiClientAuth, unassign)
-router.post('/unassign-all', apiClientAuth, unassignAll)
+router.post('/manual-assign/:id', apiClientAuth, manuallyAssign)
+router.post('/unassign/:id', apiClientAuth, unassign)
+router.post('/unassign-all/:planId', apiClientAuth, unassignAll)
 router.get('/assignments/:planId', apiClientAuth, getFullPlan)
 router.get('/assignments/:planId/unit/:unitId', apiClientAuth, getPlanById)
 
