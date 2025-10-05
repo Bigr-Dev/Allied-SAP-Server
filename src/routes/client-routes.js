@@ -68,6 +68,7 @@ import {
 import {
   addIdleUnit,
   autoAssignLoads,
+  deletePlan,
   getAllPlans,
   getFullPlan,
   getPlanById,
@@ -228,5 +229,8 @@ router.get('/plans/:planId', apiClientAuth, getFullPlan)
 // GET A SINGLE UNIT WITHIN A PLAN
 // GET /plans/:planId/units/:unitId
 router.get('/plans/:planId/units/:unitId', apiClientAuth, getPlanById)
+
+// e.g., in your router setup
+router.delete('/plans/:planId', apiClientAuth, deletePlan)
 
 export default router

@@ -572,10 +572,21 @@ async function fetchUnassignedBucket(planId) {
 }
 
 async function recalcUsedCapacity(planId) {
-  await database
-    .rpc('recalc_plan_used_capacity', { p_plan_id: planId })
-    .catch(() => {})
+  try {
+    const { error } = await database.rpc('recalc_plan_used_capacity', {
+      p_plan_id: planId,
+    })
+    // best-effort: ignore error, but you could log it if you want
+    // if (error) console.warn('recalc_plan_used_capacity:', error.message)
+  } catch (_) {
+    // swallow — keep the commit flow resilient
+  }
 }
+// async function recalcUsedCapacity(planId) {
+//   await database
+//     .rpc('recalc_plan_used_capacity', { p_plan_id: planId })
+//     .catch(() => {})
+// }
 
 /** route_id -> { branch_id, route_name } */
 async function fetchRouteBranchMap() {
@@ -1079,6 +1090,7 @@ function packItemsIntoUnits(
 //   include_branch_name=true       -> attach scope_branch_name
 //   ids=<comma-separated UUIDs>    -> fetch only these plan IDs (order preserved by run_at desc)
 
+// getAllPlans
 export const getAllPlans = async (req, res) => {
   try {
     const {
@@ -1222,6 +1234,48 @@ export const getAllPlans = async (req, res) => {
         plans: augmented,
       })
     )
+  } catch (err) {
+    return res.status(500).json(new Response(500, 'Server Error', err.message))
+  }
+}
+
+/** DELETE a whole plan (and its units/assignments via FK cascades) */
+export const deletePlan = async (req, res) => {
+  try {
+    const { planId } = req.params
+    if (!planId) {
+      return res
+        .status(400)
+        .json(new Response(400, 'Bad Request', 'planId required'))
+    }
+
+    // Optional: confirm it exists (helpful to return 404s)
+    const { data: exists, error: getErr } = await database
+      .from('assignment_plans')
+      .select('id')
+      .eq('id', planId)
+      .single()
+
+    if (getErr?.code === 'PGRST116') {
+      // Not found
+      return res
+        .status(404)
+        .json(new Response(404, 'Not Found', 'Plan not found'))
+    } else if (getErr) {
+      throw getErr
+    }
+
+    // Hard delete; rely on ON DELETE CASCADE for child rows
+    const { error: delErr } = await database
+      .from('assignment_plans')
+      .delete()
+      .eq('id', planId)
+
+    if (delErr) throw delErr
+
+    return res
+      .status(200)
+      .json(new Response(200, 'OK', 'Plan deleted', { plan_id: planId }))
   } catch (err) {
     return res.status(500).json(new Response(500, 'Server Error', err.message))
   }
@@ -2216,17 +2270,90 @@ export const unassignAll = async (req, res) => {
 }
 
 /** FETCH full plan */
+/** FETCH full plan (parity with auto-assign response) */
 export const getFullPlan = async (req, res) => {
   try {
     const { planId } = req.params
+
+    // 1) Parity with auto-assign: recalc first so used_capacity_kg is fresh
+    await recalcUsedCapacity(planId) // auto-assign calls this before fetching units :contentReference[oaicite:0]{index=0}
+
+    // 2) Fetch all pieces (in parallel)
     const plan = await fetchPlan(planId)
-    const unitsDb = await fetchPlanUnits(planId)
-    const assignsDb = await fetchPlanAssignments(planId)
-    const bucket = await fetchUnassignedBucket(planId)
+    const [unitsDb, assignsDb, bucket] = await Promise.all([
+      fetchPlanUnits(planId), // reads v_plan_units_summary
+      fetchPlanAssignments(planId),
+      fetchUnassignedBucket(planId), // reads base bucket table :contentReference[oaicite:1]{index=1}
+    ])
+
+    // 3) Safety net: if view still returns 0 for used_capacity_kg, compute from assignments
+    const usedByUnit = new Map()
+    for (const a of assignsDb) {
+      usedByUnit.set(
+        a.plan_unit_id,
+        (usedByUnit.get(a.plan_unit_id) || 0) +
+          Number(a.assigned_weight_kg || 0)
+      )
+    }
+    for (const u of unitsDb) {
+      if (!u.used_capacity_kg || Number(u.used_capacity_kg) === 0) {
+        u.used_capacity_kg = usedByUnit.get(u.plan_unit_id) || 0
+      }
+    }
+
+    // 4) Build the nested manifest (same helper used elsewhere)
+    const nested = buildNested(unitsDb, assignsDb, bucket) // returns { assigned_units, unassigned } :contentReference[oaicite:2]{index=2} :contentReference[oaicite:3]{index=3}
+
+    // 5) Parity field: idle_units_by_branch (per-plan idle = no assignments)
+    const assignedCounts = new Map()
+    for (const a of assignsDb) {
+      assignedCounts.set(
+        a.plan_unit_id,
+        (assignedCounts.get(a.plan_unit_id) || 0) + 1
+      )
+    }
+    const idleUnits = unitsDb
+      .filter((u) => !assignedCounts.get(u.plan_unit_id))
+      .map((u) => ({
+        unit_key: `plan_unit:${u.plan_unit_id}`,
+        unit_type: u.unit_type,
+        driver_id: u.driver_id,
+        driver_name: u.driver_name,
+        fleet_number: u.rigid_fleet || u.horse_fleet || u.trailer_fleet || null,
+        plate: u.rigid_plate || u.horse_plate || u.trailer_plate || null,
+        capacity_kg: Number(u.capacity_kg || 0),
+        capacity_left_kg: Number(u.capacity_left || u.capacity_kg || 0),
+        length_mm: Number(u.length_mm || 0),
+        category: u.category || '',
+        priority: Number(u.priority || 0),
+        branch_id: u.branch_id ?? null,
+        branch_name: u.branch_name ?? null,
+      }))
+
+    const idleByBranchMap = new Map()
+    for (const x of idleUnits) {
+      const k = x.branch_id == null ? 'unknown' : String(x.branch_id)
+      if (!idleByBranchMap.has(k)) {
+        idleByBranchMap.set(k, {
+          branch_id: x.branch_id ?? null,
+          branch_name:
+            x.branch_name || (x.branch_id == null ? 'Unknown' : null),
+          total_idle: 0,
+          units: [],
+        })
+      }
+      const g = idleByBranchMap.get(k)
+      g.total_idle += 1
+      g.units.push(x)
+    }
+    const idle_units_by_branch = Array.from(idleByBranchMap.values())
+
+    // 6) Respond in the same structure as auto-assign (plan + nested + idle_by_branch)
     return res.status(200).json(
       new Response(200, 'OK', 'Plan fetched', {
         plan,
-        ...buildNested(unitsDb, assignsDb, bucket),
+        ...nested, // { assigned_units, unassigned } :contentReference[oaicite:4]{index=4}
+        idle_units_by_branch,
       })
     )
   } catch (err) {
@@ -2234,29 +2361,164 @@ export const getFullPlan = async (req, res) => {
   }
 }
 
+// export const getFullPlan = async (req, res) => {
+//   try {
+//     const { planId } = req.params
+//     const plan = await fetchPlan(planId)
+//     const unitsDb = await fetchPlanUnits(planId)
+//     const assignsDb = await fetchPlanAssignments(planId)
+//     const bucket = await fetchUnassignedBucket(planId)
+
+//     // Build the same nested structure used by auto-assign
+//     const nested = buildNested(unitsDb, assignsDb, bucket) // => { assigned_units, unassigned } :contentReference[oaicite:3]{index=3}
+
+//     // Parity with auto-assign: include idle_units_by_branch.
+//     // We define “idle” here as plan units with zero assignments.
+//     // (Auto-assign’s preview/commit used the larger candidate pool; for a
+//     //  persisted plan view, per-plan idleness is the most intuitive.)
+//     const assignedCounts = new Map()
+//     for (const a of assignsDb) {
+//       assignedCounts.set(
+//         a.plan_unit_id,
+//         (assignedCounts.get(a.plan_unit_id) || 0) + 1
+//       )
+//     }
+//     const idleUnits = unitsDb
+//       .filter((u) => !assignedCounts.get(u.plan_unit_id))
+//       .map((u) => ({
+//         unit_key: `plan_unit:${u.plan_unit_id}`,
+//         unit_type: u.unit_type,
+//         driver_id: u.driver_id,
+//         driver_name: u.driver_name,
+//         fleet_number: u.rigid_fleet || u.horse_fleet || u.trailer_fleet || null,
+//         plate: u.rigid_plate || u.horse_plate || u.trailer_plate || null,
+//         capacity_kg: Number(u.capacity_kg || 0),
+//         capacity_left_kg: Number(u.capacity_left || u.capacity_kg || 0),
+//         length_mm: Number(u.length_mm || 0),
+//         category: u.category || '',
+//         priority: Number(u.priority || 0),
+//         branch_id: u.branch_id ?? null,
+//         branch_name: u.branch_name ?? null, // present if v_plan_units_summary exposes it
+//       }))
+//     const idleByBranchMap = new Map()
+//     for (const x of idleUnits) {
+//       const key = x.branch_id == null ? 'unknown' : String(x.branch_id)
+//       if (!idleByBranchMap.has(key)) {
+//         idleByBranchMap.set(key, {
+//           branch_id: x.branch_id ?? null,
+//           branch_name:
+//             x.branch_name || (x.branch_id == null ? 'Unknown' : null),
+//           total_idle: 0,
+//           units: [],
+//         })
+//       }
+//       const g = idleByBranchMap.get(key)
+//       g.total_idle += 1
+//       g.units.push(x)
+//     }
+//     const idle_units_by_branch = Array.from(idleByBranchMap.values())
+
+//     return res.status(200).json(
+//       new Response(200, 'OK', 'Plan fetched', {
+//         plan,
+//         ...nested, // { assigned_units, unassigned } :contentReference[oaicite:4]{index=4}
+//         idle_units_by_branch, // parity with auto-assign :contentReference[oaicite:5]{index=5}
+//       })
+//     )
+//   } catch (err) {
+//     return res.status(500).json(new Response(500, 'Server Error', err.message))
+//   }
+// }
+
+// export const getFullPlan = async (req, res) => {
+//   try {
+//     const { planId } = req.params
+//     const plan = await fetchPlan(planId)
+//     const unitsDb = await fetchPlanUnits(planId)
+//     const assignsDb = await fetchPlanAssignments(planId)
+//     const bucket = await fetchUnassignedBucket(planId)
+//     return res.status(200).json(
+//       new Response(200, 'OK', 'Plan fetched', {
+//         plan,
+//         ...buildNested(unitsDb, assignsDb, bucket),
+//       })
+//     )
+//   } catch (err) {
+//     return res.status(500).json(new Response(500, 'Server Error', err.message))
+//   }
+// }
+
 /** FETCH single unit */
+/** FETCH single unit within a plan (with correct used_capacity_kg) */
 export const getPlanById = async (req, res) => {
   try {
     const { planId, unitId } = req.params
-    const unitsDb = await fetchPlanUnits(planId)
+
+    // 1) Keep parity with assign/unassign flows: recalc first
+    await recalcUsedCapacity(planId)
+
+    // 2) Pull units/assignments/bucket in parallel
+    const [unitsDb, assignsDb, bucket] = await Promise.all([
+      fetchPlanUnits(planId), // reads v_plan_units_summary
+      fetchPlanAssignments(planId),
+      fetchUnassignedBucket(planId),
+    ])
+
+    // 3) Find the requested unit
     const unit = unitsDb.find((u) => String(u.plan_unit_id) === String(unitId))
-    if (!unit)
+    if (!unit) {
       return res
         .status(404)
         .json(new Response(404, 'Not Found', 'Unit not found in plan'))
-    const assignsDb = await fetchPlanAssignments(planId)
-    const bucket = await fetchUnassignedBucket(planId)
+    }
+
+    // 4) Safety net: if the view returns 0, compute used from assignments
+    const myAssigns = assignsDb.filter(
+      (a) => String(a.plan_unit_id) === String(unitId)
+    )
+    if (!unit.used_capacity_kg || Number(unit.used_capacity_kg) === 0) {
+      unit.used_capacity_kg = myAssigns.reduce(
+        (s, a) => s + Number(a.assigned_weight_kg || 0),
+        0
+      )
+    }
+
+    // 5) Build the same nested structure the app expects
+    const nested = buildNested([unit], myAssigns, bucket) // reads used_capacity_kg off the unit we just patched. :contentReference[oaicite:3]{index=3}
+
     return res.status(200).json(
       new Response(200, 'OK', 'Unit fetched', {
         plan_unit: unit,
-        ...buildNested(
-          [unit],
-          assignsDb.filter((a) => String(a.plan_unit_id) === String(unitId)),
-          bucket
-        ),
+        ...nested, // { assigned_units, unassigned }
       })
     )
   } catch (err) {
     return res.status(500).json(new Response(500, 'Server Error', err.message))
   }
 }
+
+// export const getPlanById = async (req, res) => {
+//   try {
+//     const { planId, unitId } = req.params
+//     const unitsDb = await fetchPlanUnits(planId)
+//     const unit = unitsDb.find((u) => String(u.plan_unit_id) === String(unitId))
+//     if (!unit)
+//       return res
+//         .status(404)
+//         .json(new Response(404, 'Not Found', 'Unit not found in plan'))
+//     const assignsDb = await fetchPlanAssignments(planId)
+//     const bucket = await fetchUnassignedBucket(planId)
+//     return res.status(200).json(
+//       new Response(200, 'OK', 'Unit fetched', {
+//         plan_unit: unit,
+//         ...buildNested(
+//           [unit],
+//           assignsDb.filter((a) => String(a.plan_unit_id) === String(unitId)),
+//           bucket
+//         ),
+//       })
+//     )
+//   } catch (err) {
+//     return res.status(500).json(new Response(500, 'Server Error', err.message))
+//   }
+// }
