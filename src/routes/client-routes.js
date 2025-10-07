@@ -58,13 +58,13 @@ import {
   getAllItemsWithContext,
   getGroupedRoutes,
 } from '../controllers/groupedRoutesController.js'
-import {
-  autoAssign,
-  getVehicleAssignmentsByDate,
-  unassign,
-  // manuallyAssign,
-  // unassign,
-} from '../controllers/autoAssignment-controller.js'
+// import {
+//   autoAssign,
+//   getVehicleAssignmentsByDate,
+//   unassign,
+//   // manuallyAssign,
+//   // unassign,
+// } from '../controllers/autoAssignment-controller.js'
 import {
   addIdleUnit,
   autoAssignLoads,
@@ -74,6 +74,7 @@ import {
   getPlanById,
   manuallyAssign,
   unassignAll,
+  unassign,
 } from '../controllers/assignment-planner-controller.js'
 // import { autoAssignLoads } from '../../old-code/autoAssignment-controller.js'
 

@@ -7,6 +7,11 @@ import { Response } from '../utils/classes.js'
 
 /* ============================== tiny utils ============================== */
 
+function asISOorNull(x) {
+  const s = (x ?? '').toString().trim()
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s : null
+}
+
 /** parse meters expressed as strings like "13", "13.2", "13,2", "11,5 " → mm */
 function parseMetersToMm(raw) {
   if (raw == null) return 0
@@ -340,104 +345,45 @@ function todayTomorrow() {
 /* ============================== data access ============================== */
 
 async function fetchUnits(branchId) {
-  // Step 1: get units from the view
-  let q = database.from('v_dispatch_units').select('*')
-  if (branchId) q = q.eq('branch_id', branchId)
-  const { data: units, error } = await q
-  if (error) throw error
-
-  if (!units || !units.length) return []
-
-  // Step 2: collect all vehicle ids referenced by each unit
-  const ids = new Set()
-  for (const u of units) {
-    if (u.rigid_id) ids.add(u.rigid_id)
-    if (u.horse_id) ids.add(u.horse_id)
-    if (u.trailer_id) ids.add(u.trailer_id)
+  let { data, error } = await database
+    .from('v_dispatch_units_enhanced')
+    .select('*')
+  if (error) {
+    const { data: fall, error: e2 } = await database
+      .from('v_dispatch_units')
+      .select('*')
+    if (e2) throw e2
+    data = fall || []
   }
-
-  // Step 3: fetch the referenced vehicles (we need .length (m), .priority, and .geozone)
-  const { data: vehs, error: vehErr } = await database
-    .from('vehicles')
-    .select('id,length,priority,geozone,vehicle_category')
-    .in('id', Array.from(ids))
-  if (vehErr) throw vehErr
-
-  const vmap = new Map()
-  for (const v of vehs || []) vmap.set(v.id, v)
-
-  // helper to compute a unit’s effective length:
-  // - prefer trailer length for horse+trailer
-  // - else rigid length (rigid units)
-  // - else horse length
-  // - else the max of any available piece, as a fallback
-  function lengthForUnit(u) {
-    const lTrailer =
-      u.trailer_id && vmap.get(u.trailer_id)
-        ? parseMetersToMm(vmap.get(u.trailer_id).length)
-        : 0
-    const lRigid =
-      u.rigid_id && vmap.get(u.rigid_id)
-        ? parseMetersToMm(vmap.get(u.rigid_id).length)
-        : 0
-    const lHorse =
-      u.horse_id && vmap.get(u.horse_id)
-        ? parseMetersToMm(vmap.get(u.horse_id).length)
-        : 0
-
-    if (u.unit_type === 'horse+trailer' && lTrailer) return lTrailer
-    if (u.unit_type === 'rigid' && lRigid) return lRigid
-
-    return Math.max(lTrailer, lRigid, lHorse, 0)
+  if (branchId && branchId !== 'all') {
+    data = data.filter((r) => String(r.branch_id || '') === String(branchId))
   }
-
-  // derive a simple category: flag ASSM if any attached vehicle’s geozone equals 'ASSM'
-  function categoryForUnit(u) {
-    const geo = [
-      u.trailer_id && vmap.get(u.trailer_id)?.geozone,
-      u.horse_id && vmap.get(u.horse_id)?.geozone,
-      u.rigid_id && vmap.get(u.rigid_id)?.geozone,
-    ].map((x) => (x || '').toString().trim().toUpperCase())
-
-    return geo.includes('ASSM') ? 'ASSM' : ''
-  }
-
-  // pick a priority (highest of available piece priorities)
-  function priorityForUnit(u) {
-    const pr = [
-      u.trailer_id && vmap.get(u.trailer_id)?.priority,
-      u.horse_id && vmap.get(u.horse_id)?.priority,
-      u.rigid_id && vmap.get(u.rigid_id)?.priority,
-    ]
-      .map((x) => Number(x))
-      .filter((n) => Number.isFinite(n))
-    return pr.length ? Math.max(...pr) : 0
-  }
-
-  // Step 4: return enriched units
-  return units.map((u) => ({
-    ...u,
-    length_mm: lengthForUnit(u), // <—— hydrated from vehicles.length (meters)
-    priority: priorityForUnit(u) || 0, // optional
-    category: categoryForUnit(u), // optional ('ASSM' or '')
-  }))
+  return data || []
 }
 
-async function fetchItems(cutoffDate, branchId, customerId) {
-  // v_unassigned_items columns: load_id, route_id, route_name, branch_id, order_date, suburb_name, order_id, customer_id, customer_name, item_id, weight_kg, description, is_lip_channel
+// delivery-date–centric pool that mirrors the loads UI
+async function fetchItems(cutoffDate, departureDate, branchId, customerId) {
+  // Use the view we discussed earlier:
+  //   v_planner_items_effective (alias: order_date = loads.delivery_date)
   let q = database
-    .from('v_unassigned_items')
+    .from('v_planner_items_effective')
     .select('*')
-    .lte('order_date', cutoffDate)
-  // Stable, useful packing order: oldest first, heavier first within day
-  q = q
+    .gte('order_date', cutoffDate) // window start (YYYY-MM-DD)
+    .lte('order_date', departureDate) // window end
     .order('order_date', { ascending: true })
     .order('weight_kg', { ascending: false })
-  if (branchId) q = q.eq('branch_id', branchId)
-  if (customerId) q = q.eq('customer_id', customerId)
+
+  if (branchId && branchId !== 'all') q = q.eq('branch_id', branchId)
+  if (customerId && customerId !== 'all') q = q.eq('customer_id', customerId)
+
   const { data, error } = await q
   if (error) throw error
-  return data || []
+
+  // Keep shape identical; just add route_group for the packer
+  return (data || []).map((it) => ({
+    ...it,
+    route_group: extractRouteGroup(it.route_name || it.suburb_name || ''),
+  }))
 }
 
 async function fetchPlan(planId) {
@@ -1293,7 +1239,7 @@ export const autoAssignLoads = async (req, res) => {
       departure_date,
       cutoff_date,
       branch_id,
-      customer_id,
+      customer_id = null,
       commit = false,
       notes = null,
 
@@ -1307,13 +1253,34 @@ export const autoAssignLoads = async (req, res) => {
       routeAffinitySlop = 0.25, // NEW
     } = req.body || {}
 
+    console.log('body :>> ', {
+      departure_date,
+      cutoff_date,
+      branch_id,
+      customer_id,
+      commit,
+      notes,
+    })
+
     const { today, tomorrow } = todayTomorrow()
-    const dep = departure_date || tomorrow
-    const cut = cutoff_date || today
+    const depIn = asISOorNull(departure_date)
+    const cutIn = asISOorNull(cutoff_date)
+    const dep = depIn || tomorrow // fallback as before
+    const cut = cutIn || today // fallback as before
+
+    // Map branch from either key
+    const branch = req.body?.branch_id || req.body?.scope_branch_id || null
+
+    // customer 'all' means no filter
+    const customer =
+      req.body?.customer_id && req.body.customer_id !== 'all'
+        ? req.body.customer_id
+        : null
 
     // units + backlog
-    const units = await fetchUnits(branch_id)
-    const itemsRaw = await fetchItems(cut, branch_id, customer_id)
+    const units = await fetchUnits(branch)
+    // IMPORTANT: pass both dates now (cutoff & departure) so the window is respected
+    const itemsRaw = await fetchItems(cut, dep, branch, customer)
 
     // enrich items with route group + branch fallback from routes table
     const routeMap = await fetchRouteBranchMap()
