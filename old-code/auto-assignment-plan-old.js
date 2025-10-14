@@ -4,67 +4,61 @@ import {
   fetchTripsUsedByVehicle,
   familyFrom,
   vehicleKey,
+  // normalizeBranchFilter,
   todayTomorrow,
   asISOorNull,
   fetchUnits,
   fetchItems,
   fetchRouteBranchMap,
   packItemsIntoUnits,
+  scopeBranchForPlanSave,
   recalcUsedCapacity,
   fetchPlanUnits,
   fetchPlanAssignments,
   fetchUnassignedBucket,
   buildNested,
   parseBranchSingle,
+  applySingleBranchFilter,
   sumWeightsByUnitIdx,
 } from '../../helpers/assignment-planner-helpers.js'
 import { Response } from '../../utils/classes.js'
 import database from '../../config/supabase.js'
 
-/**
- * Clean auto-assign controller with:
- * - NO per-zone cap
- * - NO per-day trips cap
- * - Per-customer unit cap DISABLED by default (can be re-enabled via body)
- * - Relies on early-family filter in the packer (helper) to spread onto new units
- * - Clear preview vs commit paths with robust bucket writing
- */
 export const autoAssignLoads = async (req, res) => {
   try {
     const {
       departure_date,
       cutoff_date,
-      branch_id, // string UUID | "all" | null
-      customer_id = null, // string UUID | "all" | null
+      branch_id, // string | array | 'all'
+      customer_id = null, // string | 'all' | null
       commit = false,
       notes = null,
 
-      // knobs (kept for compatibility; safe defaults)
+      // knobs (kept for compatibility)
       capacityHeadroom = 0.1,
       lengthBufferMm = 600,
+      // maxTrucksPerZone = 2,
       ignoreLengthIfMissing = true,
       ignoreDepartment = true,
-      // IMPORTANT: default to Infinity => no per-customer unit cap
-      customerUnitCap = Infinity,
+      customerUnitCap = 2, // 👈 actually enforced now
       routeAffinitySlop = 0.25,
-
-      // debug
-      debug_bypass_rules = false, // if true, skip rule stage entirely (diagnostics only)
     } = req.body || {}
-
+    console.log('branch_id :>> ', branch_id)
     const { today, tomorrow } = todayTomorrow()
     const dep = asISOorNull(departure_date) || tomorrow
     const cut = asISOorNull(cutoff_date) || today
 
-    // Single-branch-or-all filter used by current helpers
+    //const branchFilter = normalizeBranchFilter(branch_id)
     const branch = parseBranchSingle(branch_id) // uuid or null ("all")
     const customer = customer_id && customer_id !== 'all' ? customer_id : null
 
-    // === Pull data
+    // --- data pulls
     const units = await fetchUnits(branch)
     const itemsRaw = await fetchItems(cut, branch, customer)
+    //const units = await fetchUnits(branchFilter) // update fetchUnits to accept array|null filter
+    //const itemsRaw = await fetchItems(cut, branchFilter, customer) // update fetchItems to accept array|null
 
-    // Map route info upfront (stamps normalized route family)
+    // map route info
     const routeMap = await fetchRouteBranchMap()
     const items = itemsRaw.map((it) => {
       const fromRoute = it.route_id ? routeMap.get(it.route_id) : null
@@ -79,7 +73,7 @@ export const autoAssignLoads = async (req, res) => {
       }
     })
 
-    // === Pack (early-family spreading is handled in the helper)
+    // pack
     const {
       placements,
       unplaced,
@@ -88,28 +82,25 @@ export const autoAssignLoads = async (req, res) => {
     } = packItemsIntoUnits(items, units, {
       capacityHeadroom,
       lengthBufferMm,
+      //   maxTrucksPerZone,
       ignoreLengthIfMissing,
       ignoreDepartment,
-      customerUnitCap, // soft hint for the packer only
+      customerUnitCap, // still passed to packer (soft), we’ll hard-enforce next
       routeAffinitySlop,
     })
 
-    // === Rules (hard enforcement) — keep minimal; no day/zone caps
-    let filteredPlacements = placements
-    let ruleRejected = []
+    // trips used per vehicle for this departure date
+    // const tripsUsedMap = await fetchTripsUsedByVehicle(database, dep)
 
-    if (!debug_bypass_rules) {
-      const resRules = enforcePackingRules(placements, shapedUnits, {
-        // Per-customer cap only if finite; Infinity disables it (handled inside helper)
-        customerUnitCap,
-        // No trips/day cap is passed on purpose.
-        // tripsUsedMap is not needed anymore for daily caps; omit to avoid accidental use.
+    // hard rules: strict family, per-customer unit cap, 2 trips/day/vehicle
+    const { filtered: filteredPlacements, rejected: ruleRejected } =
+      enforcePackingRules(placements, shapedUnits, {
+        // customerUnitCap,
+        // tripsUsedMap,
+        // maxTripsPerVehiclePerDay: 2,
       })
-      filteredPlacements = resRules.filtered
-      ruleRejected = resRules.rejected
-    }
 
-    // === Idle units (purely informational; not filtered by day caps)
+    // idle units by branch (exclude those already 2 trips today)
     let branchNameById = new Map()
     try {
       const { data: branchRows } = await database
@@ -118,11 +109,15 @@ export const autoAssignLoads = async (req, res) => {
       if (branchRows?.length)
         branchNameById = new Map(branchRows.map((b) => [String(b.id), b.name]))
     } catch {}
-
     const usedIdxSetPreview = new Set(filteredPlacements.map((p) => p.unitIdx))
     const idleUnits = shapedUnits
       .map((u, idx) => ({ u, idx }))
-      .filter(({ idx }) => !usedIdxSetPreview.has(idx))
+      .filter(({ u, idx }) => !usedIdxSetPreview.has(idx))
+      // .filter(({ u, idx }) => {
+      //   if (usedIdxSetPreview.has(idx)) return false
+      //   const usedTrips = Number(tripsUsedMap.get(vehicleKey(u)) || 0)
+      //   return usedTrips < 2
+      // })
       .map(({ u, idx }) => ({
         unit_key:
           u.unit_type === 'rigid'
@@ -144,7 +139,7 @@ export const autoAssignLoads = async (req, res) => {
         branch_name: branchNameById.get(String(u.branch_id ?? '')) || null,
       }))
 
-    // === PREVIEW
+    // --- PREVIEW
     if (!commit) {
       const weightByIdx = sumWeightsByUnitIdx(filteredPlacements)
       const used = Array.from(weightByIdx.keys())
@@ -192,7 +187,7 @@ export const autoAssignLoads = async (req, res) => {
         }
       })
 
-      // rejected (rules) + original unplaced → bucket
+      // rejected (rule) + original unplaced → bucket
       const bucket = [
         ...unplaced,
         ...ruleRejected.map((p) => ({
@@ -204,7 +199,7 @@ export const autoAssignLoads = async (req, res) => {
           suburb_name: p.item.suburb_name,
           route_name: p.item.route_name,
           order_date: p.item.order_date,
-          weight_left: p.item.weight_kg,
+          weight_left: p.item.weight_kg, // best-effort
           description: p.item.description,
           reason: 'rule_rejected',
         })),
@@ -224,15 +219,13 @@ export const autoAssignLoads = async (req, res) => {
                 (capacityHeadroom || 0) * 100
               )}%`,
               length_buffer_mm: Number(lengthBufferMm || 0),
+              //  zone_unit_cap: maxTrucksPerZone,
               ignore_length_if_missing: !!ignoreLengthIfMissing,
               ignore_department: !!ignoreDepartment,
-              // If you set a finite number here, it will be enforced.
-              customer_unit_cap: Number.isFinite(Number(customerUnitCap))
-                ? Number(customerUnitCap)
-                : 'Infinity',
+              customer_unit_cap: Number(customerUnitCap),
               route_affinity_slop: routeAffinitySlop,
-              hard_route_lock: true, // now handled early in packer
-              debug_bypass_rules: !!debug_bypass_rules,
+              hard_route_lock: true,
+              //   max_trips_per_vehicle_per_day: 2,
             },
           },
           ...nested,
@@ -254,14 +247,16 @@ export const autoAssignLoads = async (req, res) => {
       )
     }
 
-    // === COMMIT
+    // --- COMMIT
+    //  const scopeBranchIdToSave = scopeBranchForPlanSave(branchFilter)
+
     const planIns = await database
       .from('assignment_plans')
       .insert([
         {
           departure_date: dep,
           cutoff_date: cut,
-          scope_branch_id: branch,
+          scope_branch_id: branch, // <-- not the array
           scope_customer_id: customer || null,
           notes,
         },
@@ -270,6 +265,21 @@ export const autoAssignLoads = async (req, res) => {
       .single()
 
     if (planIns.error) throw planIns.error
+
+    // const planIns = await database
+    //   .from('assignment_plans')
+    //   .insert([
+    //     {
+    //       departure_date: dep,
+    //       cutoff_date: cut,
+    //       scope_branch_id: branchFilter || null,
+    //       scope_customer_id: customer || null,
+    //       notes,
+    //     },
+    //   ])
+    //   .select('*')
+    //   .single()
+    // if (planIns.error) throw planIns.error
     const plan = planIns.data
 
     // Build raw rows from filtered placements (keep unitIdx)
@@ -283,7 +293,7 @@ export const autoAssignLoads = async (req, res) => {
       _item: p.item,
     }))
 
-    // Filter duplicates at DB level to avoid collisions
+    // Filter duplicates at DB level
     const uniqueIds = [
       ...new Set(rawRows.map((r) => r.item_id).filter(Boolean)),
     ]
@@ -297,9 +307,10 @@ export const autoAssignLoads = async (req, res) => {
         r.item_id && !existingIds.has(r.item_id) && r.assigned_weight_kg > 0
     )
 
-    // No rows => write bucket & finish
+    // Short-circuit if nothing remains → don’t create empty units
     if (!rowsToInsert.length) {
       const finalBucket = await fetchUnassignedBucket(plan.id)
+
       return res.status(200).json(
         new Response(
           200,
@@ -314,7 +325,40 @@ export const autoAssignLoads = async (req, res) => {
       )
     }
 
-    // Prepare bucket for rejects + unplaced + duplicates/zero-weight
+    // if (!rowsToInsert.length) {
+    //   const bucket = [
+    //     ...unplaced,
+    //     ...filteredPlacements.map((p) => ({
+    //       load_id: p.item.load_id,
+    //       order_id: p.item.order_id,
+    //       item_id: p.item.item_id,
+    //       customer_id: p.item.customer_id,
+    //       customer_name: p.item.customer_name,
+    //       suburb_name: p.item.suburb_name,
+    //       route_name: p.item.route_name,
+    //       order_date: p.item.order_date,
+    //       weight_left: p.item.weight_kg,
+    //       description: p.item.description,
+    //       reason: existingIds.has(p.item.item_id)
+    //         ? 'already_assigned'
+    //         : 'zero_weight',
+    //     })),
+    //   ]
+
+    //   return res.status(200).json(
+    //     new Response(
+    //       200,
+    //       'OK',
+    //       'Nothing to assign (duplicates or zero weight). Plan created without units.',
+    //       {
+    //         plan,
+    //         assigned_units: [],
+    //         unassigned: bucket,
+    //       }
+    //     )
+    //   )
+    // }
+
     const rejectedForBucket = [
       ...ruleRejected.map((p) => ({
         load_id: p.item.load_id,
@@ -369,7 +413,10 @@ export const autoAssignLoads = async (req, res) => {
         const { error } = await database
           .from('assignment_plan_unassigned_items')
           .insert(bucketRows)
-        if (error) console.warn('Bucket write failed:', error.message)
+        if (error) {
+          console.warn('Bucket write failed:', error.message)
+        }
+        // .catch((err) => console.warn('Bucket write failed:', err.message))
       }
     }
 
@@ -377,12 +424,13 @@ export const autoAssignLoads = async (req, res) => {
     const usedIdxSet = new Set(rowsToInsert.map((r) => r.unitIdx))
     const planUnitIdByIdx = new Map()
 
-    // If you keep trip numbers historically, you can still compute "trip_no" without capping:
-    // const latestTrips = await fetchTripsUsedByVehicle(database, dep)
-
+    // Recompute trips used (concurrent safety)
+    const latestTrips = await fetchTripsUsedByVehicle(database, dep)
     for (const idx of usedIdxSet) {
       const u = shapedUnits[idx]
       if (!u) continue
+      const key = vehicleKey(u)
+      //  const usedTrips = Number(latestTrips.get(key) || 0)
 
       const ins = await database
         .from('assignment_plan_units')
@@ -406,17 +454,18 @@ export const autoAssignLoads = async (req, res) => {
             branch_id: u.branch_id || null,
             category: u.category || '',
             length_mm: u.length_mm || 0,
-            // trip_no: (Number(latestTrips.get(vehicleKey(u)) || 0)) + 1, // optional, no clamp
+            // trip_no: usedTrips + 1, // no clamp
           },
         ])
         .select('*')
         .single()
-
       if (ins.error) throw ins.error
+
+      //latestTrips.set(key, usedTrips + 1)
       planUnitIdByIdx.set(idx, ins.data.id)
     }
 
-    // Insert assignments for created plan units
+    // Now insert assignments for units we actually created
     const toInsert = rowsToInsert
       .filter((r) => planUnitIdByIdx.has(r.unitIdx))
       .map((r) => ({
@@ -444,7 +493,11 @@ export const autoAssignLoads = async (req, res) => {
       const { error } = await database
         .from('assignment_plan_unassigned_items')
         .insert(itemsWithoutUnits)
-      if (error) console.warn('Unit-failed bucket write failed:', error.message)
+
+      if (error) {
+        console.warn('Unit-failed bucket write failed:', error.message)
+      }
+      // .catch(() => {})
     }
 
     if (toInsert.length) {

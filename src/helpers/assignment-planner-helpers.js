@@ -1,3 +1,6 @@
+
+
+
 import database from '../config/supabase.js'
 
 /* ============================== tiny utils ============================== */
@@ -178,7 +181,7 @@ export function packItemsIntoUnits(
   {
     capacityHeadroom = 0.1,
     lengthBufferMm = 600,
-    maxTrucksPerZone = 2, // reserved for future soft-caps
+    //  maxTrucksPerZone = 2, // reserved for future soft-caps
     ignoreLengthIfMissing = true,
     ignoreDepartment = true,
     customerUnitCap = 2,
@@ -239,6 +242,11 @@ export function packItemsIntoUnits(
       if (!lengthOk) continue
       // capacity
       if (st.capacity_left < needKg) continue
+
+      // NEW: respect family early so we don’t reject later
+      const existingFam = st.routeGroups && [...st.routeGroups.keys()][0]
+      if (st.assigned_count > 0 && existingFam && existingFam !== group)
+        continue
 
       pool.push({ idx, u, st })
     }
@@ -413,8 +421,8 @@ export async function fetchUnits(branchId) {
 export function enforcePackingRules(placements, shapedUnits, options) {
   const {
     customerUnitCap = 2,
-    tripsUsedMap, // Map(vehicleKey -> trips used today)
-    maxTripsPerVehiclePerDay = 2,
+    //tripsUsedMap, // Map(vehicleKey -> trips used today)
+    //maxTripsPerVehiclePerDay = 2,
   } = options
 
   // track first family set per unitIdx; and per-customer distinct unit count
@@ -431,12 +439,12 @@ export function enforcePackingRules(placements, shapedUnits, options) {
     }
 
     // vehicle eligibility by trips used
-    const vkey = vehicleKey(u)
-    const usedTrips = Number(tripsUsedMap.get(vkey) || 0)
-    if (usedTrips >= maxTripsPerVehiclePerDay) {
-      rejected.push(p)
-      continue
-    }
+    // const vkey = vehicleKey(u)
+    // const usedTrips = Number(tripsUsedMap.get(vkey) || 0)
+    // if (usedTrips >= maxTripsPerVehiclePerDay) {
+    //   rejected.push(p)
+    //   continue
+    // }
 
     // strict family lock
     const fam = familyFrom(p.item.route_name)

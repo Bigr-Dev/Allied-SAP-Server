@@ -34,8 +34,8 @@ export const autoAssignLoads = async (req, res) => {
     const {
       departure_date,
       cutoff_date,
-      branch_id, // string UUID | "all" | null
-      customer_id = null, // string UUID | "all" | null
+      branch_id,                 // string UUID | "all" | null
+      customer_id = null,        // string UUID | "all" | null
       commit = false,
       notes = null,
 
@@ -80,19 +80,15 @@ export const autoAssignLoads = async (req, res) => {
     })
 
     // === Pack (early-family spreading is handled in the helper)
-    const {
-      placements,
-      unplaced,
-      state,
-      units: shapedUnits,
-    } = packItemsIntoUnits(items, units, {
-      capacityHeadroom,
-      lengthBufferMm,
-      ignoreLengthIfMissing,
-      ignoreDepartment,
-      customerUnitCap, // soft hint for the packer only
-      routeAffinitySlop,
-    })
+    const { placements, unplaced, state, units: shapedUnits } =
+      packItemsIntoUnits(items, units, {
+        capacityHeadroom,
+        lengthBufferMm,
+        ignoreLengthIfMissing,
+        ignoreDepartment,
+        customerUnitCap,     // soft hint for the packer only
+        routeAffinitySlop,
+      })
 
     // === Rules (hard enforcement) — keep minimal; no day/zone caps
     let filteredPlacements = placements
@@ -112,11 +108,8 @@ export const autoAssignLoads = async (req, res) => {
     // === Idle units (purely informational; not filtered by day caps)
     let branchNameById = new Map()
     try {
-      const { data: branchRows } = await database
-        .from('branches')
-        .select('id,name')
-      if (branchRows?.length)
-        branchNameById = new Map(branchRows.map((b) => [String(b.id), b.name]))
+      const { data: branchRows } = await database.from('branches').select('id,name')
+      if (branchRows?.length) branchNameById = new Map(branchRows.map((b) => [String(b.id), b.name]))
     } catch {}
 
     const usedIdxSetPreview = new Set(filteredPlacements.map((p) => p.unitIdx))
@@ -220,16 +213,13 @@ export const autoAssignLoads = async (req, res) => {
             scope_customer_id: customer || null,
             commit: false,
             parameters: {
-              capacity_headroom: `${Math.round(
-                (capacityHeadroom || 0) * 100
-              )}%`,
+              capacity_headroom: `${Math.round((capacityHeadroom || 0) * 100)}%`,
               length_buffer_mm: Number(lengthBufferMm || 0),
               ignore_length_if_missing: !!ignoreLengthIfMissing,
               ignore_department: !!ignoreDepartment,
               // If you set a finite number here, it will be enforced.
-              customer_unit_cap: Number.isFinite(Number(customerUnitCap))
-                ? Number(customerUnitCap)
-                : 'Infinity',
+              customer_unit_cap:
+                Number.isFinite(Number(customerUnitCap)) ? Number(customerUnitCap) : 'Infinity',
               route_affinity_slop: routeAffinitySlop,
               hard_route_lock: true, // now handled early in packer
               debug_bypass_rules: !!debug_bypass_rules,
@@ -241,8 +231,7 @@ export const autoAssignLoads = async (req, res) => {
             if (!acc[key])
               acc[key] = {
                 branch_id: x.branch_id ?? null,
-                branch_name:
-                  x.branch_name || (x.branch_id == null ? 'Unknown' : null),
+                branch_name: x.branch_name || (x.branch_id == null ? 'Unknown' : null),
                 total_idle: 0,
                 units: [],
               }
@@ -284,33 +273,25 @@ export const autoAssignLoads = async (req, res) => {
     }))
 
     // Filter duplicates at DB level to avoid collisions
-    const uniqueIds = [
-      ...new Set(rawRows.map((r) => r.item_id).filter(Boolean)),
-    ]
+    const uniqueIds = [...new Set(rawRows.map((r) => r.item_id).filter(Boolean))]
     const { data: existing } = await database
       .from('assignment_plan_item_assignments')
       .select('item_id')
       .in('item_id', uniqueIds)
     const existingIds = new Set((existing || []).map((r) => r.item_id))
     const rowsToInsert = rawRows.filter(
-      (r) =>
-        r.item_id && !existingIds.has(r.item_id) && r.assigned_weight_kg > 0
+      (r) => r.item_id && !existingIds.has(r.item_id) && r.assigned_weight_kg > 0
     )
 
     // No rows => write bucket & finish
     if (!rowsToInsert.length) {
       const finalBucket = await fetchUnassignedBucket(plan.id)
       return res.status(200).json(
-        new Response(
-          200,
-          'OK',
-          'Nothing to assign (duplicates or zero weight). Plan created without units.',
-          {
-            plan,
-            assigned_units: [],
-            unassigned: finalBucket,
-          }
-        )
+        new Response(200, 'OK', 'Nothing to assign (duplicates or zero weight). Plan created without units.', {
+          plan,
+          assigned_units: [],
+          unassigned: finalBucket,
+        })
       )
     }
 
@@ -336,12 +317,7 @@ export const autoAssignLoads = async (req, res) => {
           reason: 'already_assigned',
         })),
       ...rawRows
-        .filter(
-          (r) =>
-            r.item_id &&
-            !existingIds.has(r.item_id) &&
-            Number(r.assigned_weight_kg) <= 0
-        )
+        .filter((r) => r.item_id && !existingIds.has(r.item_id) && Number(r.assigned_weight_kg) <= 0)
         .map((r) => ({
           load_id: r.load_id,
           order_id: r.order_id,
@@ -366,9 +342,7 @@ export const autoAssignLoads = async (req, res) => {
         }))
 
       if (bucketRows.length) {
-        const { error } = await database
-          .from('assignment_plan_unassigned_items')
-          .insert(bucketRows)
+        const { error } = await database.from('assignment_plan_unassigned_items').insert(bucketRows)
         if (error) console.warn('Bucket write failed:', error.message)
       }
     }
@@ -386,29 +360,27 @@ export const autoAssignLoads = async (req, res) => {
 
       const ins = await database
         .from('assignment_plan_units')
-        .insert([
-          {
-            plan_id: plan.id,
-            unit_type: u.unit_type,
-            rigid_id: u.rigid_id,
-            trailer_id: u.trailer_id,
-            horse_id: u.horse_id,
-            driver_id: u.driver_id,
-            driver_name: u.driver_name,
-            rigid_plate: u.rigid_plate,
-            rigid_fleet: u.rigid_fleet,
-            horse_plate: u.horse_plate,
-            horse_fleet: u.horse_fleet,
-            trailer_plate: u.trailer_plate,
-            trailer_fleet: u.trailer_fleet,
-            capacity_kg: u.capacity_kg,
-            priority: u.priority || 0,
-            branch_id: u.branch_id || null,
-            category: u.category || '',
-            length_mm: u.length_mm || 0,
-            // trip_no: (Number(latestTrips.get(vehicleKey(u)) || 0)) + 1, // optional, no clamp
-          },
-        ])
+        .insert([{
+          plan_id: plan.id,
+          unit_type: u.unit_type,
+          rigid_id: u.rigid_id,
+          trailer_id: u.trailer_id,
+          horse_id: u.horse_id,
+          driver_id: u.driver_id,
+          driver_name: u.driver_name,
+          rigid_plate: u.rigid_plate,
+          rigid_fleet: u.rigid_fleet,
+          horse_plate: u.horse_plate,
+          horse_fleet: u.horse_fleet,
+          trailer_plate: u.trailer_plate,
+          trailer_fleet: u.trailer_fleet,
+          capacity_kg: u.capacity_kg,
+          priority: u.priority || 0,
+          branch_id: u.branch_id || null,
+          category: u.category || '',
+          length_mm: u.length_mm || 0,
+          // trip_no: (Number(latestTrips.get(vehicleKey(u)) || 0)) + 1, // optional, no clamp
+        }])
         .select('*')
         .single()
 
