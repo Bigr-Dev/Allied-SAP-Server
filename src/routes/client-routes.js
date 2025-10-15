@@ -59,7 +59,7 @@ import {
   getGroupedRoutes,
 } from '../controllers/groupedRoutesController.js'
 import { autoAssignLoads } from '../controllers/assignment-planner-controllers/auto-assign-plan.js'
-import { getAllPlans } from '../controllers/assignment-planner-controller.js'
+import { getAllPlans } from '../controllers/assignment-planner-controllers/get-plans.js'
 import { addIdleUnit } from '../controllers/assignment-planner-controllers/add-idle-unit.js'
 import { manuallyAssign } from '../controllers/assignment-planner-controllers/manually-assign-unit.js'
 import { bulkAssignToUnits } from '../controllers/assignment-planner-controllers/bulk-assign.js'
