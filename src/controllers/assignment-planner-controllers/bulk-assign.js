@@ -124,7 +124,7 @@ export const bulkAssignToUnits = async (req, res) => {
 
     // 4) Pull candidate item details from v_unassigned_items_effective (still-unassigned + scope)
     let q = database
-      .from('v_unassigned_items_effective')
+      .from('v_unassigned_items')
       .select(
         'item_id, load_id, order_id, customer_id, customer_name, suburb_name, route_name, order_date, description, weight_kg, order_number, branch_id'
       )
@@ -307,11 +307,32 @@ export const bulkAssignToUnits = async (req, res) => {
     if (insA.error) throw insA.error
 
     await recalcUsedCapacity(plan.id)
-    const [unitsDb, assignsDb, bucket] = await Promise.all([
+    // const [unitsDb, assignsDb, bucket] = await Promise.all([
+    //   fetchPlanUnits(plan.id),
+    //   fetchPlanAssignments(plan.id),
+    //   fetchUnassignedBucket(plan.id),
+    // ])
+    const [unitsDb, assignsDb, bucketRaw] = await Promise.all([
       fetchPlanUnits(plan.id),
       fetchPlanAssignments(plan.id),
       fetchUnassignedBucket(plan.id),
     ])
+
+    const bucket = []
+    const seen = new Set()
+    for (const r of bucketRaw || []) {
+      const k = r.item_id ?? `${r.load_id}:${r.order_id}:${r.description}`
+      if (seen.has(k)) continue
+      seen.add(k)
+      bucket.push(r)
+    }
+
+    return res.status(200).json(
+      new Response(200, 'OK', `Bulk assigned ${rowsToInsert.length} item(s)`, {
+        plan: { id: plan.id, departure_date: plan.departure_date },
+        ...buildNested(unitsDb, assignsDb, bucket),
+      })
+    )
 
     return res.status(200).json(
       new Response(200, 'OK', `Bulk assigned ${rowsToInsert.length} item(s)`, {

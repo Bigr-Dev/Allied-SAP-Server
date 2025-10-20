@@ -1,6 +1,3 @@
-
-
-
 import database from '../config/supabase.js'
 
 /* ============================== tiny utils ============================== */
@@ -515,7 +512,7 @@ export async function fetchPlanAssignments(planId) {
     const { data: itemRows, error: iErr } = await database
       .from('v_unassigned_items')
       .select(
-        'item_id, description, customer_id, customer_name, suburb_name, route_name, order_date, sales_order_number:order_number'
+        'item_id, description, customer_id, customer_name, suburb_name, route_name, order_date, order_number'
       )
       .in('item_id', uniqueItemIds)
 
@@ -723,7 +720,7 @@ export async function fetchItems(cutoffDate, branchId, customerId) {
       order_date, description,
       weight_kg,
       branch_id,
-      sales_order_number:order_number
+      order_number
     `
     )
     .lte('order_date', cutoffDate)
@@ -757,7 +754,7 @@ export async function enrichBucketDetails(bucketRows) {
   const { data: details, error } = await database
     .from('v_unassigned_items')
     .select(
-      'item_id, description, customer_id, customer_name, suburb_name, route_name, order_date, order_id, load_id, sales_order_number:order_number'
+      'item_id, description, customer_id, customer_name, suburb_name, route_name, order_date, order_id, load_id, order_number'
     )
     .in('item_id', itemIds)
 

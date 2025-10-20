@@ -264,7 +264,7 @@ async function fetchItems(cutoffDate, branchId, customerId) {
       order_date, description,
       weight_kg,
       branch_id,
-      sales_order_number:order_number
+      order_number
     `
     )
     .lte('order_date', cutoffDate)
@@ -339,7 +339,7 @@ async function fetchPlanAssignments(planId) {
     const { data: itemRows, error: iErr } = await database
       .from('v_unassigned_items')
       .select(
-        'item_id, description, customer_id, customer_name, suburb_name, route_name, order_date, sales_order_number:order_number'
+        'item_id, description, customer_id, customer_name, suburb_name, route_name, order_date, order_number'
       )
       .in('item_id', uniqueItemIds)
 
@@ -463,7 +463,7 @@ async function enrichBucketDetails(bucketRows) {
   const { data: details, error } = await database
     .from('v_unassigned_items')
     .select(
-      'item_id, description, customer_id, customer_name, suburb_name, route_name, order_date, order_id, load_id, sales_order_number:order_number'
+      'item_id, description, customer_id, customer_name, suburb_name, route_name, order_date, order_id, load_id, order_number'
     )
     .in('item_id', itemIds)
 
@@ -779,11 +779,12 @@ function packItemsIntoUnits(
   {
     capacityHeadroom = 0.1,
     lengthBufferMm = 600,
-    maxTrucksPerZone = 2, // reserved for future soft-caps
+    //  maxTrucksPerZone = 2, // reserved for future soft-caps
     ignoreLengthIfMissing = true,
     ignoreDepartment = true,
-    customerUnitCap = 2,
+    customerUnitCap = 2, // soft hint only (hard cap lives in rules)
     routeAffinitySlop = 0.25, // reserved hook
+    lockOrderToSingleUnit = true, // 👈 NEW: keep all items of an order on the same unit
   } = {}
 ) {
   // Normalize units (with headroom)
@@ -806,7 +807,7 @@ function packItemsIntoUnits(
   const state = units.map(() => ({
     capacity_left: 0,
     assigned_count: 0,
-    routeGroups: new Map(),
+    routeGroups: new Map(), // macro-route family counts
   }))
   for (let i = 0; i < units.length; i++)
     state[i].capacity_left = toNumber(units[i].capacity_left)
@@ -814,46 +815,74 @@ function packItemsIntoUnits(
   const placements = []
   const unplaced = []
 
+  // Track first chosen unit per ORDER to prevent splits
+  const orderUnit = new Map() // order_id -> unitIdx
+
+  // helper (unused for rules here, retained for compatibility)
   const custKey = (it) => it.customer_id || `NAME:${it.customer_name || ''}`
 
   for (const item of items || []) {
     const needKg = Math.max(0, toNumber(item.weight_kg))
     if (!needKg) continue
+
     const needLenMm =
       parseItemLengthFromDescription(item.description) +
       Number(lengthBufferMm || 0)
+
     const itemBranch = item.branch_id ?? null
     const group = extractRouteGroup(item.route_name || item.suburb_name || '')
+    const orderId = item.order_id
 
-    // build candidate pool
-    const pool = []
+    // ---- Build candidate pool
+    let pool = []
     for (let idx = 0; idx < units.length; idx++) {
       const u = units[idx]
       const st = state[idx]
 
-      // branch
+      // Branch constraint
       if (itemBranch && String(u.branch_id || '') !== String(itemBranch))
         continue
-      // length
+
+      // Length constraint
       const lengthOk =
         u.length_mm > 0 ? u.length_mm >= needLenMm : !!ignoreLengthIfMissing
       if (!lengthOk) continue
-      // capacity
+
+      // Capacity constraint
       if (st.capacity_left < needKg) continue
 
+      // Early route-family consistency:
+      // if a unit already carries a family, don't mix families here
+      const existingFam = st.routeGroups && [...st.routeGroups.keys()][0]
+      if (st.assigned_count > 0 && existingFam && existingFam !== group)
+        continue
+
       pool.push({ idx, u, st })
+    }
+
+    // If we already locked this order to a unit, restrict to that unit
+    if (lockOrderToSingleUnit && orderId != null && orderUnit.has(orderId)) {
+      const lockedIdx = orderUnit.get(orderId)
+      pool = pool.filter((p) => p.idx === lockedIdx)
     }
 
     if (!pool.length) {
       unplaced.push({
         ...item,
         weight_left: needKg,
-        reason: 'No unit meets capacity/length/branch constraints',
+        reason:
+          lockOrderToSingleUnit && orderId != null && orderUnit.has(orderId)
+            ? 'Order lock prevented split; insufficient capacity/length on locked unit'
+            : 'No unit meets capacity/length/branch constraints',
       })
       continue
     }
 
-    // prefer units already carrying same macro-route; then length/weight fit; then leftover; then priority
+    // ---- Choose best candidate:
+    // 1) macro-route affinity
+    // 2) geometry fit score (length dominates, then weight)
+    // 3) minimal leftover capacity after placing
+    // 4) unit priority (higher first)
     pool.sort((A, B) => {
       const affA = routeAffinity(A.st, group)
       const affB = routeAffinity(B.st, group)
@@ -875,6 +904,13 @@ function packItemsIntoUnits(
     const st = state[chosenIdx]
 
     placements.push({ unitIdx: chosenIdx, item, weight: needKg })
+
+    // Lock the order to this unit for subsequent items (prevents splits)
+    if (lockOrderToSingleUnit && orderId != null && !orderUnit.has(orderId)) {
+      orderUnit.set(orderId, chosenIdx)
+    }
+
+    // Update unit state
     st.capacity_left = Math.max(0, st.capacity_left - needKg)
     st.assigned_count += 1
     if (group) st.routeGroups.set(group, (st.routeGroups.get(group) || 0) + 1)
@@ -882,6 +918,116 @@ function packItemsIntoUnits(
 
   return { placements, unplaced, state, units }
 }
+
+// function packItemsIntoUnits(
+//   items,
+//   rawUnits,
+//   {
+//     capacityHeadroom = 0.1,
+//     lengthBufferMm = 600,
+//     maxTrucksPerZone = 2, // reserved for future soft-caps
+//     ignoreLengthIfMissing = true,
+//     ignoreDepartment = true,
+//     customerUnitCap = 2,
+//     routeAffinitySlop = 0.25, // reserved hook
+//   } = {}
+// ) {
+//   // Normalize units (with headroom)
+//   const units = (rawUnits || []).map((u) => {
+//     const baseCap = toNumber(u.capacity_kg, 0)
+//     const effCap = Math.max(
+//       0,
+//       Math.round(baseCap * (1 + Number(capacityHeadroom || 0)))
+//     )
+//     return {
+//       ...u,
+//       capacity_left: effCap,
+//       length_mm: toNumber(u.length_mm, 0),
+//       category: String(u.category || '').toUpperCase(),
+//       priority: toNumber(u.priority, 0),
+//       branch_id: u.branch_id ?? null,
+//     }
+//   })
+
+//   const state = units.map(() => ({
+//     capacity_left: 0,
+//     assigned_count: 0,
+//     routeGroups: new Map(),
+//   }))
+//   for (let i = 0; i < units.length; i++)
+//     state[i].capacity_left = toNumber(units[i].capacity_left)
+
+//   const placements = []
+//   const unplaced = []
+
+//   const custKey = (it) => it.customer_id || `NAME:${it.customer_name || ''}`
+
+//   for (const item of items || []) {
+//     const needKg = Math.max(0, toNumber(item.weight_kg))
+//     if (!needKg) continue
+//     const needLenMm =
+//       parseItemLengthFromDescription(item.description) +
+//       Number(lengthBufferMm || 0)
+//     const itemBranch = item.branch_id ?? null
+//     const group = extractRouteGroup(item.route_name || item.suburb_name || '')
+
+//     // build candidate pool
+//     const pool = []
+//     for (let idx = 0; idx < units.length; idx++) {
+//       const u = units[idx]
+//       const st = state[idx]
+
+//       // branch
+//       if (itemBranch && String(u.branch_id || '') !== String(itemBranch))
+//         continue
+//       // length
+//       const lengthOk =
+//         u.length_mm > 0 ? u.length_mm >= needLenMm : !!ignoreLengthIfMissing
+//       if (!lengthOk) continue
+//       // capacity
+//       if (st.capacity_left < needKg) continue
+
+//       pool.push({ idx, u, st })
+//     }
+
+//     if (!pool.length) {
+//       unplaced.push({
+//         ...item,
+//         weight_left: needKg,
+//         reason: 'No unit meets capacity/length/branch constraints',
+//       })
+//       continue
+//     }
+
+//     // prefer units already carrying same macro-route; then length/weight fit; then leftover; then priority
+//     pool.sort((A, B) => {
+//       const affA = routeAffinity(A.st, group)
+//       const affB = routeAffinity(B.st, group)
+//       if (affA !== affB) return affB - affA
+
+//       const sa = scoreUnit(A.u, needKg, needLenMm)
+//       const sb = scoreUnit(B.u, needKg, needLenMm)
+//       if (sa !== sb) return sa - sb
+
+//       const ra = A.st.capacity_left - needKg
+//       const rb = B.st.capacity_left - needKg
+//       if (ra !== rb) return ra - rb
+
+//       return (B.u.priority || 0) - (A.u.priority || 0)
+//     })
+
+//     const chosen = pool[0]
+//     const chosenIdx = chosen.idx
+//     const st = state[chosenIdx]
+
+//     placements.push({ unitIdx: chosenIdx, item, weight: needKg })
+//     st.capacity_left = Math.max(0, st.capacity_left - needKg)
+//     st.assigned_count += 1
+//     if (group) st.routeGroups.set(group, (st.routeGroups.get(group) || 0) + 1)
+//   }
+
+//   return { placements, unplaced, state, units }
+// }
 
 /* ============================== endpoints ============================== */
 
