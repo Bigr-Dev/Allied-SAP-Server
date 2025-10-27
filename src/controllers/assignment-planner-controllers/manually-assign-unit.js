@@ -81,6 +81,25 @@ export const manuallyAssign = async (req, res) => {
         )
     }
 
+    // Check if items are in bucket first, remove them if assigning
+    const { data: bucketItems, error: bucketErr } = await database
+      .from('assignment_plan_unassigned_items')
+      .select('item_id')
+      .eq('plan_id', plan.id)
+      .in('item_id', requestedIds)
+    if (bucketErr) throw bucketErr
+    
+    const bucketItemIds = new Set((bucketItems || []).map(r => r.item_id))
+    if (bucketItemIds.size > 0) {
+      // Remove from bucket before assigning
+      const { error: delBucketErr } = await database
+        .from('assignment_plan_unassigned_items')
+        .delete()
+        .eq('plan_id', plan.id)
+        .in('item_id', [...bucketItemIds])
+      if (delBucketErr) throw delBucketErr
+    }
+
     // Pull candidate rows from effective-unassigned view, respecting scope
     let q = database
       .from('v_unassigned_items_effective')
@@ -111,16 +130,34 @@ export const manuallyAssign = async (req, res) => {
       note: noteMap.get(r.item_id) ?? null,
     }))
 
-    // Insert (✅ pass database correctly)
+    // Insert assignments with enhanced duplicate checking
     const ins = await insertAssignmentsSafely(database, preRows)
     if (ins.error) {
+      // If assignment fails and we removed from bucket, restore to bucket
+      if (bucketItemIds.size > 0) {
+        const restoreRows = preRows
+          .filter(r => bucketItemIds.has(r.item_id))
+          .map(r => ({
+            plan_id: plan.id,
+            load_id: r.load_id,
+            order_id: r.order_id, 
+            item_id: r.item_id,
+            weight_left: r.weight_kg,
+            reason: 'assignment_failed'
+          }))
+        if (restoreRows.length) {
+          await database
+            .from('assignment_plan_unassigned_items')
+            .insert(restoreRows)
+        }
+      }
       return res
         .status(500)
         .json(new Response(500, 'Server Error', ins.error.message))
     }
 
     // Recalc used capacity
-    await recalcUsedCapacity(database, plan.id, [plan_unit_id])
+    await recalcUsedCapacity(plan.id)
 
     // Return nested payload
     const [unitsDb, assignsDb, bucket] = await Promise.all([

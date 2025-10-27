@@ -142,15 +142,17 @@
 // }
 import { Response } from '../../utils/classes.js'
 import database from '../../config/supabase.js'
+import { todayTomorrow } from '../../helpers/assignment-planner-helpers.js'
 
 export const getAllPlans = async (req, res) => {
+  console.log('tomorrow :>> ', todayTomorrow().tomorrow)
   try {
     const {
-      limit = 50,
+      limit = 1000,
       offset = 0,
       order = 'desc',
-      date_from,
-      date_to,
+      date_from = todayTomorrow().today,
+      date_to = todayTomorrow().tomorrow,
       branch_id,
       customer_id,
       include_units,

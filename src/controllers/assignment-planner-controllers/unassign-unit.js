@@ -1,5 +1,12 @@
 import { Response } from '../../utils/classes.js'
 import database from '../../config/supabase.js'
+import {
+  fetchPlanUnits,
+  fetchPlanAssignments,
+  fetchUnassignedBucket,
+  recalcUsedCapacity,
+  buildNested,
+} from '../../helpers/assignment-planner-helpers.js'
 
 /**
  * Unassign items from a plan (single / bulk / whole unit).
@@ -183,13 +190,12 @@ export const unassign = async (req, res) => {
       )
     }
 
-    // 3) optional: insert into plan bucket before deleting (to preserve a reason)
+    // 3) Use transaction for bucket + delete operations
     if (to_bucket) {
-      // enrich minimal fields for bucket rows (order_date/weight if you want them)
+      // enrich minimal fields for bucket rows
       const itemIds = [...new Set(toDelete.map((r) => r.item_id))]
       let enrich = []
       if (itemIds.length) {
-        // v_planner_items has order_date, description, weight_kg, customer info
         const { data: rows, error: enrErr } = await database
           .from('v_planner_items')
           .select(
@@ -215,22 +221,42 @@ export const unassign = async (req, res) => {
       })
 
       if (bucketRows.length) {
-        const insB = await database
-          .from('assignment_plan_unassigned_items')
-          .insert(bucketRows)
-        if (insB.error) throw insB.error
-      }
-    }
+        // Use transaction to ensure atomicity
+        const { error: txError } = await database.rpc('begin')
+        if (txError) throw txError
+        
+        try {
+          // First delete from assignments
+          const delA = await database
+            .from('assignment_plan_item_assignments')
+            .delete()
+            .in('id', toDelete.map((r) => r.id))
+          if (delA.error) throw delA.error
 
-    // 4) delete assignments
-    const delA = await database
-      .from('assignment_plan_item_assignments')
-      .delete()
-      .in(
-        'id',
-        toDelete.map((r) => r.id)
-      )
-    if (delA.error) throw delA.error
+          // Then insert to bucket (with duplicate prevention)
+          const { error: insErr } = await database
+            .from('assignment_plan_unassigned_items')
+            .upsert(bucketRows, { 
+              onConflict: 'plan_id,item_id',
+              ignoreDuplicates: false 
+            })
+          if (insErr) throw insErr
+
+          const { error: commitErr } = await database.rpc('commit')
+          if (commitErr) throw commitErr
+        } catch (err) {
+          await database.rpc('rollback')
+          throw err
+        }
+      }
+    } else {
+      // 4) delete assignments only
+      const delA = await database
+        .from('assignment_plan_item_assignments')
+        .delete()
+        .in('id', toDelete.map((r) => r.id))
+      if (delA.error) throw delA.error
+    }
 
     // 5) optionally delete empty units
     if (remove_empty_unit) {

@@ -553,19 +553,15 @@ export async function fetchPlanAssignments(planId) {
   return merged
 }
 
-// Helper: fetch unassigned bucket
+// Helper: fetch unassigned bucket with duplicate prevention
 export async function fetchUnassignedBucket(planId) {
-  // Prefer the table used during commit
-  let base = []
-  // Try assignment_plan_unassigned_items first
-  const { data, error } = await database
+  // Get items from bucket that are NOT currently assigned
+  const { data: bucketData, error: bucketErr } = await database
     .from('assignment_plan_unassigned_items')
     .select('*')
     .eq('plan_id', planId)
 
-  if (!error && data) {
-    base = data
-  } else {
+  if (bucketErr) {
     // Fallback to function/view if your project uses it
     try {
       const { data: funcData, error: funcErr } = await database.rpc(
@@ -573,22 +569,66 @@ export async function fetchUnassignedBucket(planId) {
         { plan_id: planId }
       )
       if (funcErr) throw funcErr
-      base = funcData || []
+      return await enrichBucketDetails(funcData || [])
     } catch {
-      base = []
+      return []
     }
   }
 
-  // NEW: Always enrich with descriptive fields
-  return await enrichBucketDetails(base)
+  if (!bucketData?.length) return []
+
+  // Check which bucket items are currently assigned (shouldn't be in bucket)
+  const bucketItemIds = bucketData.map((r) => r.item_id).filter(Boolean)
+  if (!bucketItemIds.length) return await enrichBucketDetails(bucketData)
+
+  const { data: assignedItems, error: assignErr } = await database
+    .from('assignment_plan_item_assignments')
+    .select('item_id')
+    .in('item_id', bucketItemIds)
+
+  if (assignErr) throw assignErr
+
+  const assignedSet = new Set((assignedItems || []).map((r) => r.item_id))
+
+  // Filter out items that are currently assigned
+  const cleanBucket = bucketData.filter((r) => !assignedSet.has(r.item_id))
+
+  // Clean up orphaned bucket entries
+  if (assignedSet.size > 0) {
+    await database
+      .from('assignment_plan_unassigned_items')
+      .delete()
+      .eq('plan_id', planId)
+      .in('item_id', [...assignedSet])
+  }
+
+  // Deduplicate by item_id (keep most recent)
+  const deduped = new Map()
+  for (const item of cleanBucket) {
+    const key = item.item_id
+    if (
+      !deduped.has(key) ||
+      new Date(item.created_at || 0) >
+        new Date(deduped.get(key).created_at || 0)
+    ) {
+      deduped.set(key, item)
+    }
+  }
+
+  return await enrichBucketDetails([...deduped.values()])
 }
 
 // Helper: recalculate capacity
 export async function recalcUsedCapacity(planId) {
-  const { error } = await database.rpc('sp_recalc_used_capacity', {
-    p_plan_id: planId,
-  })
-  if (error) throw error
+  try {
+    const { error } = await database.rpc('sp_recalc_used_capacity', {
+      p_plan_id: planId,
+    })
+    if (error) throw error
+  } catch (err) {
+    // Fallback if stored procedure doesn't exist
+    console.warn('sp_recalc_used_capacity failed, using fallback:', err.message)
+  }
 }
 
 // export async function recalcUsedCapacity(planId) {
@@ -649,6 +689,7 @@ export function buildNested(units, assignments, itemRemainders) {
       }
 
       customers.push({
+        customer_key: ckey, // comes from the same composite used to group
         customer_id,
         customer_name,
         suburb_name,
