@@ -221,33 +221,21 @@ export const unassign = async (req, res) => {
       })
 
       if (bucketRows.length) {
-        // Use transaction to ensure atomicity
-        const { error: txError } = await database.rpc('begin')
-        if (txError) throw txError
-        
-        try {
-          // First delete from assignments
-          const delA = await database
-            .from('assignment_plan_item_assignments')
-            .delete()
-            .in('id', toDelete.map((r) => r.id))
-          if (delA.error) throw delA.error
+        // First delete from assignments
+        const delA = await database
+          .from('assignment_plan_item_assignments')
+          .delete()
+          .in('id', toDelete.map((r) => r.id))
+        if (delA.error) throw delA.error
 
-          // Then insert to bucket (with duplicate prevention)
-          const { error: insErr } = await database
-            .from('assignment_plan_unassigned_items')
-            .upsert(bucketRows, { 
-              onConflict: 'plan_id,item_id',
-              ignoreDuplicates: false 
-            })
-          if (insErr) throw insErr
-
-          const { error: commitErr } = await database.rpc('commit')
-          if (commitErr) throw commitErr
-        } catch (err) {
-          await database.rpc('rollback')
-          throw err
-        }
+        // Then insert to bucket (with duplicate prevention)
+        const { error: insErr } = await database
+          .from('assignment_plan_unassigned_items')
+          .upsert(bucketRows, { 
+            onConflict: 'plan_id,item_id',
+            ignoreDuplicates: false 
+          })
+        if (insErr) throw insErr
       }
     } else {
       // 4) delete assignments only

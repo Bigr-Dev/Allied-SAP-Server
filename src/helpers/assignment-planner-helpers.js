@@ -297,14 +297,14 @@ export async function insertAssignmentsSafely(database, rows) {
     .from('assignment_plan_item_assignments')
     .select('item_id')
     .in('item_id', ids)
-  if (existErr) throw existErr
+  if (existErr) return { data: null, error: existErr }
 
   const existingIds = new Set((existing || []).map((r) => r.item_id))
   const toInsert = rows.filter(
     (r) =>
       r.item_id &&
       !existingIds.has(r.item_id) &&
-      Number(r.assigned_weight_kg) > 0
+      Number(r.assigned_weight_kg || r.weight_kg || 0) > 0
   )
 
   if (!toInsert.length) return { data: [], error: null }

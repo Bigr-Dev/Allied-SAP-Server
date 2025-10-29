@@ -66,6 +66,7 @@ import { bulkAssignToUnits } from '../controllers/assignment-planner-controllers
 import { unassign } from '../controllers/assignment-planner-controllers/unassign-unit.js'
 import { deletePlan } from '../controllers/assignment-planner-controllers/delete-plan.js'
 import { getPlan } from '../controllers/assignment-planner-controllers/get-plan.js'
+import { setUnitNote } from '../controllers/assignment-planner-controllers/set-unit-note.js'
 
 // import {
 //   autoAssignLoads,      // preview/commit plans (strict family lock baked in here)
@@ -370,6 +371,9 @@ router.post('/plans', apiClientAuth, getPlan)
 //     ...arguments,
 //   })
 // )
+
+// POST /api/assignment-planner/units/note
+router.post('/units/note', setUnitNote)
 
 export default router
 

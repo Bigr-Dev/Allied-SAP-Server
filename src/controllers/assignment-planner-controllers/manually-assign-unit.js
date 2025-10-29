@@ -123,11 +123,13 @@ export const manuallyAssign = async (req, res) => {
     const preRows = (cand || []).map((r) => ({
       plan_id: plan.id,
       plan_unit_id,
+      load_id: r.load_id,
+      order_id: r.order_id,
       item_id: r.item_id,
-      weight_kg: Number.isFinite(+weightMap.get(r.item_id))
+      assigned_weight_kg: Number.isFinite(+weightMap.get(r.item_id))
         ? +weightMap.get(r.item_id)
-        : null,
-      note: noteMap.get(r.item_id) ?? null,
+        : Number(r.weight_kg || 0),
+      priority_note: noteMap.get(r.item_id) ?? 'manual',
     }))
 
     // Insert assignments with enhanced duplicate checking
@@ -161,9 +163,9 @@ export const manuallyAssign = async (req, res) => {
 
     // Return nested payload
     const [unitsDb, assignsDb, bucket] = await Promise.all([
-      fetchPlanUnits(database, plan.id),
-      fetchPlanAssignments(database, plan.id),
-      fetchUnassignedBucket(database, plan.id),
+      fetchPlanUnits(plan.id),
+      fetchPlanAssignments(plan.id),
+      fetchUnassignedBucket(plan.id),
     ])
 
     return res.status(200).json(
