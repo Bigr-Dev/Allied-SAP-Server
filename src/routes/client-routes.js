@@ -373,7 +373,7 @@ router.post('/plans', apiClientAuth, getPlan)
 // )
 
 // POST /api/assignment-planner/units/note
-router.post('/units/note', setUnitNote)
+router.post('/plans/units/note', setUnitNote)
 
 export default router
 

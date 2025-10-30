@@ -703,6 +703,7 @@ export function buildNested(units, assignments, itemRemainders) {
       unit_type: u.unit_type,
       driver_id: u.driver_id,
       driver_name: u.driver_name,
+      ops_note: u.ops_note || null,
       rigid:
         u.unit_type === 'rigid'
           ? {
@@ -728,7 +729,7 @@ export function buildNested(units, assignments, itemRemainders) {
             }
           : null,
       capacity_kg: Number(u.capacity_kg),
-      used_capacity_kg: Number(u.used_capacity_kg), // make sure upstream SELECT provides this
+      used_capacity_kg: Number(u.used_capacity_kg),
       customers,
     })
   }
