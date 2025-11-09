@@ -1,968 +1,982 @@
-// import {
-//   insertAssignmentsSafely,
-//   enforcePackingRules,
-//   fetchTripsUsedByVehicle,
-//   familyFrom,
-//   vehicleKey,
-//   todayTomorrow,
-//   asISOorNull,
-//   fetchUnits,
-//   fetchItems,
-//   fetchRouteBranchMap,
-//   packItemsIntoUnits,
-//   recalcUsedCapacity,
-//   fetchPlanUnits,
-//   fetchPlanAssignments,
-//   fetchUnassignedBucket,
-//   buildNested,
-//   parseBranchSingle,
-//   sumWeightsByUnitIdx,
-// } from '../../helpers/assignment-planner-helpers.js'
-// import { Response } from '../../utils/classes.js'
-// import database from '../../config/supabase.js'
+// controllers/planner/auto-assign-plan.js
 
-// /**
-//  * Clean auto-assign controller with:
-//  * - NO per-zone cap
-//  * - NO per-day trips cap
-//  * - Per-customer unit cap DISABLED by default (can be re-enabled via body)
-//  * - Relies on early-family filter in the packer (helper) to spread onto new units
-//  * - Clear preview vs commit paths with robust bucket writing
-//  */
-// export const autoAssignLoads = async (req, res) => {
-//   try {
-//     const {
-//       departure_date,
-//       cutoff_date,
-//       branch_id, // string UUID | "all" | null
-//       customer_id = null, // string UUID | "all" | null
-//       commit = false,
-//       notes = null,
-
-//       // knobs (kept for compatibility; safe defaults)
-//       capacityHeadroom = 0.1,
-//       lengthBufferMm = 600,
-//       ignoreLengthIfMissing = true,
-//       ignoreDepartment = true,
-//       // IMPORTANT: default to Infinity => no per-customer unit cap
-//       customerUnitCap = Infinity,
-//       routeAffinitySlop = 0.25,
-
-//       // debug
-//       debug_bypass_rules = false, // if true, skip rule stage entirely (diagnostics only)
-//     } = req.body || {}
-
-//     const { today, tomorrow } = todayTomorrow()
-//     const dep = asISOorNull(departure_date) || tomorrow
-//     const cut = asISOorNull(cutoff_date) || today
-
-//     // Single-branch-or-all filter used by current helpers
-//     const branch = parseBranchSingle(branch_id) // uuid or null ("all")
-//     const customer = customer_id && customer_id !== 'all' ? customer_id : null
-
-//     // === Pull data
-//     const units = await fetchUnits(branch)
-//     const itemsRaw = await fetchItems(cut, branch, customer)
-
-//     // Map route info upfront (stamps normalized route family)
-//     const routeMap = await fetchRouteBranchMap()
-//     const items = itemsRaw.map((it) => {
-//       const fromRoute = it.route_id ? routeMap.get(it.route_id) : null
-//       const route_name =
-//         it.route_name || fromRoute?.route_name || it.suburb_name || ''
-//       const route_group = familyFrom(route_name) // normalized macro family
-//       return {
-//         ...it,
-//         branch_id: it.branch_id || fromRoute?.branch_id || it.branch_id,
-//         route_name,
-//         route_group,
-//       }
-//     })
-
-//     // === Pack (early-family spreading is handled in the helper)
-//     const {
-//       placements,
-//       unplaced,
-//       state,
-//       units: shapedUnits,
-//     } = packItemsIntoUnits(items, units, {
-//       capacityHeadroom,
-//       lengthBufferMm,
-//       ignoreLengthIfMissing,
-//       ignoreDepartment,
-//       customerUnitCap, // soft hint for the packer only
-//       routeAffinitySlop,
-//     })
-
-//     // === Rules (hard enforcement) — keep minimal; no day/zone caps
-//     let filteredPlacements = placements
-//     let ruleRejected = []
-
-//     if (!debug_bypass_rules) {
-//       const resRules = enforcePackingRules(placements, shapedUnits, {
-//         // Per-customer cap only if finite; Infinity disables it (handled inside helper)
-//         customerUnitCap,
-//         // No trips/day cap is passed on purpose.
-//         // tripsUsedMap is not needed anymore for daily caps; omit to avoid accidental use.
-//       })
-//       filteredPlacements = resRules.filtered
-//       ruleRejected = resRules.rejected
-//     }
-
-//     // === Idle units (purely informational; not filtered by day caps)
-//     let branchNameById = new Map()
-//     try {
-//       const { data: branchRows } = await database
-//         .from('branches')
-//         .select('id,name')
-//       if (branchRows?.length)
-//         branchNameById = new Map(branchRows.map((b) => [String(b.id), b.name]))
-//     } catch {}
-
-//     const usedIdxSetPreview = new Set(filteredPlacements.map((p) => p.unitIdx))
-//     const idleUnits = shapedUnits
-//       .map((u, idx) => ({ u, idx }))
-//       .filter(({ idx }) => !usedIdxSetPreview.has(idx))
-//       .map(({ u, idx }) => ({
-//         unit_key:
-//           u.unit_type === 'rigid'
-//             ? `rigid:${u.rigid_id ?? idx}`
-//             : u.unit_type === 'horse+trailer'
-//             ? `horse:${u.horse_id ?? idx}|trailer:${u.trailer_id ?? idx}`
-//             : `unit:${idx}`,
-//         unit_type: u.unit_type,
-//         driver_id: u.driver_id,
-//         driver_name: u.driver_name,
-//         fleet_number: u.rigid_fleet || u.horse_fleet || u.trailer_fleet || null,
-//         plate: u.rigid_plate || u.horse_plate || u.trailer_plate || null,
-//         capacity_kg: Number(u.capacity_kg),
-//         capacity_left_kg: state[idx]?.capacity_left ?? Number(u.capacity_kg),
-//         length_mm: u.length_mm || 0,
-//         category: u.category || '',
-//         priority: u.priority || 0,
-//         branch_id: u.branch_id ?? null,
-//         branch_name: branchNameById.get(String(u.branch_id ?? '')) || null,
-//       }))
-
-//     // === PREVIEW
-//     if (!commit) {
-//       const weightByIdx = sumWeightsByUnitIdx(filteredPlacements)
-//       const used = Array.from(weightByIdx.keys())
-
-//       const pseudoUnits = used.map((idx, i) => {
-//         const u = shapedUnits[idx]
-//         const usedKg = weightByIdx.get(idx) || 0
-//         return {
-//           plan_unit_id: `preview-${i}`,
-//           unit_type: u.unit_type,
-//           driver_id: u.driver_id,
-//           driver_name: u.driver_name,
-//           rigid_id: u.rigid_id,
-//           rigid_plate: u.rigid_plate,
-//           rigid_fleet: u.rigid_fleet,
-//           horse_id: u.horse_id,
-//           horse_plate: u.horse_plate,
-//           horse_fleet: u.horse_fleet,
-//           trailer_id: u.trailer_id,
-//           trailer_plate: u.trailer_plate,
-//           trailer_fleet: u.trailer_fleet,
-//           capacity_kg: Number(u.capacity_kg),
-//           used_capacity_kg: Number((usedKg || 0).toFixed(3)),
-//         }
-//       })
-
-//       const pseudoAssignments = filteredPlacements.map((p) => {
-//         const ordinal = used.indexOf(p.unitIdx)
-//         const i = p.item
-//         return {
-//           assignment_id: `preview-${p.unitIdx}-${i.item_id}`,
-//           plan_unit_id: `preview-${ordinal}`,
-//           load_id: i.load_id,
-//           order_id: i.order_id,
-//           item_id: i.item_id,
-//           assigned_weight_kg: p.weight,
-//           priority_note: 'auto',
-//           customer_id: i.customer_id,
-//           customer_name: i.customer_name,
-//           suburb_name: i.suburb_name,
-//           route_name: i.route_name,
-//           order_date: i.order_date,
-//           description: i.description,
-//           order_number: i.order_number ?? null,
-//         }
-//       })
-
-//       // rejected (rules) + original unplaced → bucket
-//       const bucket = [
-//         ...unplaced,
-//         ...ruleRejected.map((p) => ({
-//           load_id: p.item.load_id,
-//           order_id: p.item.order_id,
-//           item_id: p.item.item_id,
-//           customer_id: p.item.customer_id,
-//           customer_name: p.item.customer_name,
-//           suburb_name: p.item.suburb_name,
-//           route_name: p.item.route_name,
-//           order_date: p.item.order_date,
-//           weight_left: p.item.weight_kg,
-//           description: p.item.description,
-//           reason: 'rule_rejected',
-//         })),
-//       ]
-
-//       const nested = buildNested(pseudoUnits, pseudoAssignments, bucket)
-//       return res.status(200).json(
-//         new Response(200, 'OK', 'Auto-assignment preview (no DB changes)', {
-//           plan: {
-//             departure_date: dep,
-//             cutoff_date: cut,
-//             scope_branch_id: branch || null,
-//             scope_customer_id: customer || null,
-//             commit: false,
-//             parameters: {
-//               capacity_headroom: `${Math.round(
-//                 (capacityHeadroom || 0) * 100
-//               )}%`,
-//               length_buffer_mm: Number(lengthBufferMm || 0),
-//               ignore_length_if_missing: !!ignoreLengthIfMissing,
-//               ignore_department: !!ignoreDepartment,
-//               // If you set a finite number here, it will be enforced.
-//               customer_unit_cap: Number.isFinite(Number(customerUnitCap))
-//                 ? Number(customerUnitCap)
-//                 : 'Infinity',
-//               route_affinity_slop: routeAffinitySlop,
-//               hard_route_lock: true, // now handled early in packer
-//               debug_bypass_rules: !!debug_bypass_rules,
-//             },
-//           },
-//           ...nested,
-//           idle_units_by_branch: idleUnits.reduce((acc, x) => {
-//             const key = x.branch_id == null ? 'unknown' : String(x.branch_id)
-//             if (!acc[key])
-//               acc[key] = {
-//                 branch_id: x.branch_id ?? null,
-//                 branch_name:
-//                   x.branch_name || (x.branch_id == null ? 'Unknown' : null),
-//                 total_idle: 0,
-//                 units: [],
-//               }
-//             acc[key].total_idle += 1
-//             acc[key].units.push(x)
-//             return acc
-//           }, {}),
-//         })
-//       )
-//     }
-
-//     // === COMMIT
-//     const planIns = await database
-//       .from('assignment_plans')
-//       .insert([
-//         {
-//           departure_date: dep,
-//           cutoff_date: cut,
-//           scope_branch_id: branch,
-//           scope_customer_id: customer || null,
-//           notes,
-//         },
-//       ])
-//       .select('*')
-//       .single()
-
-//     if (planIns.error) throw planIns.error
-//     const plan = planIns.data
-
-//     // Build raw rows from filtered placements (keep unitIdx)
-//     const rawRows = filteredPlacements.map((p) => ({
-//       unitIdx: p.unitIdx,
-//       load_id: p.item.load_id,
-//       order_id: p.item.order_id,
-//       item_id: p.item.item_id,
-//       assigned_weight_kg: Number(p.weight || 0),
-//       priority_note: 'auto',
-//       _item: p.item,
-//     }))
-
-//     // Filter duplicates at DB level to avoid collisions
-//     const uniqueIds = [
-//       ...new Set(rawRows.map((r) => r.item_id).filter(Boolean)),
-//     ]
-//     const { data: existing } = await database
-//       .from('assignment_plan_item_assignments')
-//       .select('item_id')
-//       .in('item_id', uniqueIds)
-//     const existingIds = new Set((existing || []).map((r) => r.item_id))
-//     const rowsToInsert = rawRows.filter(
-//       (r) =>
-//         r.item_id && !existingIds.has(r.item_id) && r.assigned_weight_kg > 0
-//     )
-
-//     // No rows => write bucket & finish
-//     if (!rowsToInsert.length) {
-//       const finalBucket = await fetchUnassignedBucket(plan.id)
-//       return res.status(200).json(
-//         new Response(
-//           200,
-//           'OK',
-//           'Nothing to assign (duplicates or zero weight). Plan created without units.',
-//           {
-//             plan,
-//             assigned_units: [],
-//             unassigned: finalBucket,
-//           }
-//         )
-//       )
-//     }
-
-//     // Prepare bucket for rejects + unplaced + duplicates/zero-weight
-//     const rejectedForBucket = [
-//       ...ruleRejected.map((p) => ({
-//         load_id: p.item.load_id,
-//         order_id: p.item.order_id,
-//         item_id: p.item.item_id,
-//         order_date: p.item.order_date,
-//         weight_left: p.item.weight_kg,
-//         reason: 'rule_rejected',
-//       })),
-//       ...unplaced,
-//       ...rawRows
-//         .filter((r) => r.item_id && existingIds.has(r.item_id))
-//         .map((r) => ({
-//           load_id: r.load_id,
-//           order_id: r.order_id,
-//           item_id: r.item_id,
-//           order_date: r._item.order_date,
-//           weight_left: r._item.weight_kg,
-//           reason: 'already_assigned',
-//         })),
-//       ...rawRows
-//         .filter(
-//           (r) =>
-//             r.item_id &&
-//             !existingIds.has(r.item_id) &&
-//             Number(r.assigned_weight_kg) <= 0
-//         )
-//         .map((r) => ({
-//           load_id: r.load_id,
-//           order_id: r.order_id,
-//           item_id: r.item_id,
-//           order_date: r._item.order_date,
-//           weight_left: r._item.weight_kg,
-//           reason: 'zero_weight',
-//         })),
-//     ]
-
-//     if (rejectedForBucket.length) {
-//       const bucketRows = rejectedForBucket
-//         .filter((r) => r.item_id)
-//         .map((r) => ({
-//           plan_id: plan.id,
-//           load_id: r.load_id,
-//           order_id: r.order_id,
-//           item_id: r.item_id,
-//           order_date: r.order_date || null,
-//           weight_left: Number(r.weight_left || 0),
-//           reason: r.reason || 'unplaced',
-//         }))
-
-//       if (bucketRows.length) {
-//         const { error } = await database
-//           .from('assignment_plan_unassigned_items')
-//           .insert(bucketRows)
-//         if (error) console.warn('Bucket write failed:', error.message)
-//       }
-//     }
-
-//     // Create plan units ONLY for indices referenced by rowsToInsert
-//     const usedIdxSet = new Set(rowsToInsert.map((r) => r.unitIdx))
-//     const planUnitIdByIdx = new Map()
-
-//     // If you keep trip numbers historically, you can still compute "trip_no" without capping:
-//     // const latestTrips = await fetchTripsUsedByVehicle(database, dep)
-
-//     for (const idx of usedIdxSet) {
-//       const u = shapedUnits[idx]
-//       if (!u) continue
-
-//       const ins = await database
-//         .from('assignment_plan_units')
-//         .insert([
-//           {
-//             plan_id: plan.id,
-//             unit_type: u.unit_type,
-//             rigid_id: u.rigid_id,
-//             trailer_id: u.trailer_id,
-//             horse_id: u.horse_id,
-//             driver_id: u.driver_id,
-//             driver_name: u.driver_name,
-//             rigid_plate: u.rigid_plate,
-//             rigid_fleet: u.rigid_fleet,
-//             horse_plate: u.horse_plate,
-//             horse_fleet: u.horse_fleet,
-//             trailer_plate: u.trailer_plate,
-//             trailer_fleet: u.trailer_fleet,
-//             capacity_kg: u.capacity_kg,
-//             priority: u.priority || 0,
-//             branch_id: u.branch_id || null,
-//             category: u.category || '',
-//             length_mm: u.length_mm || 0,
-//             // trip_no: (Number(latestTrips.get(vehicleKey(u)) || 0)) + 1, // optional, no clamp
-//           },
-//         ])
-//         .select('*')
-//         .single()
-
-//       if (ins.error) throw ins.error
-//       planUnitIdByIdx.set(idx, ins.data.id)
-//     }
-
-//     const latestByItem = new Map()
-//     for (const r of rejectedForBucket) {
-//       if (!r.item_id) continue
-//       // last one wins (or implement a smarter merge if you prefer)
-//       latestByItem.set(r.item_id, r)
-//     }
-
-//     const bucketRows = Array.from(latestByItem.values())
-//       .filter((r) => r.item_id)
-//       .map((r) => ({
-//         plan_id: plan.id,
-//         load_id: r.load_id,
-//         order_id: r.order_id,
-//         item_id: r.item_id,
-//         order_date: r.order_date || null,
-//         weight_left: Number(r.weight_left || 0),
-//         reason: r.reason || 'unplaced',
-//       }))
-
-//     // Insert assignments for created plan units
-//     const toInsert = rowsToInsert
-//       .filter((r) => planUnitIdByIdx.has(r.unitIdx))
-//       .map((r) => ({
-//         plan_unit_id: planUnitIdByIdx.get(r.unitIdx),
-//         load_id: r.load_id,
-//         order_id: r.order_id,
-//         item_id: r.item_id,
-//         assigned_weight_kg: r.assigned_weight_kg,
-//         priority_note: r.priority_note,
-//       }))
-
-//     const itemsWithoutUnits = rowsToInsert
-//       .filter((r) => !planUnitIdByIdx.has(r.unitIdx))
-//       .map((r) => ({
-//         plan_id: plan.id,
-//         load_id: r.load_id,
-//         order_id: r.order_id,
-//         item_id: r.item_id,
-//         order_date: r._item?.order_date || null,
-//         weight_left: Number(r._item?.weight_kg || 0),
-//         reason: 'unit_creation_failed',
-//       }))
-
-//     if (itemsWithoutUnits.length) {
-//       const { error } = await database
-//         .from('assignment_plan_unassigned_items')
-//         .insert(itemsWithoutUnits)
-//       if (error) console.warn('Unit-failed bucket write failed:', error.message)
-//     }
-
-//     if (toInsert.length) {
-//       const insA = await insertAssignmentsSafely(database, toInsert)
-//       if (insA.error) throw insA.error
-//     }
-
-//     await recalcUsedCapacity(plan.id)
-
-//     const [unitsDb, assignsDb, bucket] = await Promise.all([
-//       fetchPlanUnits(plan.id),
-//       fetchPlanAssignments(plan.id),
-//       fetchUnassignedBucket(plan.id),
-//     ])
-
-//     return res.status(200).json(
-//       new Response(200, 'OK', 'Auto-assignment committed', {
-//         plan,
-//         ...buildNested(unitsDb, assignsDb, bucket),
-//       })
-//     )
-//   } catch (err) {
-//     return res.status(500).json(new Response(500, 'Server Error', err.message))
-//   }
-// }
-import {
-  insertAssignmentsSafely,
-  enforcePackingRules,
-  fetchTripsUsedByVehicle,
-  familyFrom,
-  vehicleKey,
-  todayTomorrow,
-  asISOorNull,
-  fetchUnits,
-  fetchItems,
-  fetchRouteBranchMap,
-  packItemsIntoUnits,
-  recalcUsedCapacity,
-  fetchPlanUnits,
-  fetchPlanAssignments,
-  fetchUnassignedBucket,
-  buildNested,
-  parseBranchSingle,
-  sumWeightsByUnitIdx,
-} from '../../helpers/assignment-planner-helpers.js'
-import { Response } from '../../utils/classes.js'
 import database from '../../config/supabase.js'
+import { Response } from '../../utils/classes.js'
+
+function toNumber(value, fallback = 0) {
+  if (value === null || value === undefined) return fallback
+  const n = Number(value)
+  return Number.isFinite(n) ? n : fallback
+}
+
+function asBool(value, fallback = false) {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'string') {
+    const v = value.trim().toLowerCase()
+    if (v === 'true' || v === '1' || v === 'yes' || v === 'y') return true
+    if (v === 'false' || v === '0' || v === 'no' || v === 'n') return false
+  }
+  if (typeof value === 'number') return value !== 0
+  return fallback
+}
+
+function parseCapacityKg(raw) {
+  if (!raw) return 0
+  if (typeof raw === 'number') return raw
+
+  const s = String(raw).trim().toLowerCase()
+  if (!s) return 0
+  if (s === 'inf' || s === 'infinite' || s === 'unlimited') return Infinity
+
+  const match = s.match(/([\d.,]+)/)
+  if (!match) return 0
+
+  let value = match[1].replace(',', '')
+  const n = Number(value)
+  if (!Number.isFinite(n)) return 0
+
+  if (s.includes('ton') || s.includes('t ')) return n * 1000
+  if (s.includes('kg')) return n
+
+  return n // default: assume kg
+}
+
+function shapeOrderRow(row) {
+  const orderId = row.order_id || row.id
+
+  return {
+    order_id: orderId,
+    sales_order_id: row.sales_order_id ?? null,
+    sales_order_number: row.sales_order_number ?? null,
+    delivery_date: row.delivery_date ?? null,
+
+    branch_id: row.branch_id ?? null,
+    branch_name: row.branch_name ?? null,
+
+    route_id: row.route_id ?? null,
+    route_name: row.route_name ?? null,
+
+    suburb_route_id: row.suburb_route_id ?? null,
+    suburb_name: row.suburb_name ?? null,
+    suburb_city: row.suburb_city ?? null,
+    suburb_province: row.suburb_province ?? null,
+    suburb_postal_code: row.suburb_postal_code ?? null,
+
+    customer_id: row.customer_id ?? null,
+    customer_name: row.customer_name ?? null,
+    customer_bp_code: row.customer_bp_code ?? null,
+
+    total_line_items: toNumber(row.total_line_items, 0),
+    total_quantity: toNumber(row.total_quantity, 0),
+    total_weight: toNumber(row.total_weight, 0),
+
+    status: row.status ?? null,
+    sales_person_name: row.sales_person_name ?? null,
+    address: row.address ?? null,
+
+    assignment_plan_id: row.assignment_plan_id ?? null,
+    assigned_unit_id: row.assigned_unit_id ?? null,
+    is_split: !!row.is_split,
+    // lines will be added later
+  }
+}
 
 /**
- * Clean auto-assign controller with:
- * - NO per-zone cap
- * - NO per-day trips cap
- * - Per-customer unit cap DISABLED by default (can be re-enabled via body)
- * - Relies on early-family filter in the packer (helper) to spread onto new units
- * - Clear preview vs commit paths with robust bucket writing (dedup + upsert)
+ * Auto-assign orders in a plan to vehicles per route.
  */
 export const autoAssignLoads = async (req, res) => {
   try {
-    const {
-      departure_date,
-      cutoff_date,
-      branch_id, // string UUID | "all" | null
-      customer_id = null, // string UUID | "all" | null
-      commit = false,
-      notes = null,
+    const body = req.body || {}
+    const planId = body.plan_id
+    const branchIdFilter = body.branch_id || null
+    const commitFlag = asBool(body.commit, true)
+    const maxUnitsPerCustomerPerDay = toNumber(
+      body.max_units_per_customer_per_day,
+      2
+    )
 
-      // knobs (kept for compatibility; safe defaults)
-      capacityHeadroom = 0.1,
-      lengthBufferMm = 600,
-      ignoreLengthIfMissing = true,
-      ignoreDepartment = true,
-      // IMPORTANT: default to Infinity => no per-customer unit cap
-      customerUnitCap = Infinity,
-      routeAffinitySlop = 0.25,
-
-      // debug
-      debug_bypass_rules = false, // if true, skip rule stage entirely (diagnostics only)
-    } = req.body || {}
-
-    const { today, tomorrow } = todayTomorrow()
-    const dep = asISOorNull(departure_date) || tomorrow
-    const cut = asISOorNull(cutoff_date) || today
-
-    // Single-branch-or-all filter used by current helpers
-    const branch = parseBranchSingle(branch_id) // uuid or null ("all")
-    const customer = customer_id && customer_id !== 'all' ? customer_id : null
-
-    // === Pull data
-    const units = await fetchUnits(branch)
-    const itemsRaw = await fetchItems(cut, branch, customer)
-
-    // Map route info upfront (stamps normalized route family)
-    const routeMap = await fetchRouteBranchMap()
-    const items = itemsRaw.map((it) => {
-      const fromRoute = it.route_id ? routeMap.get(it.route_id) : null
-      const route_name =
-        it.route_name || fromRoute?.route_name || it.suburb_name || ''
-      const route_group = familyFrom(route_name) // normalized macro family
-      return {
-        ...it,
-        branch_id: it.branch_id || fromRoute?.branch_id || it.branch_id,
-        route_name,
-        route_group,
-      }
-    })
-
-    // === Pack (early-family spreading is handled in the helper)
-    const {
-      placements,
-      unplaced,
-      state,
-      units: shapedUnits,
-    } = packItemsIntoUnits(items, units, {
-      capacityHeadroom,
-      lengthBufferMm,
-      ignoreLengthIfMissing,
-      ignoreDepartment,
-      customerUnitCap, // soft hint for the packer only
-      routeAffinitySlop,
-    })
-
-    // === Rules (hard enforcement) — keep minimal; no day/zone caps
-    let filteredPlacements = placements
-    let ruleRejected = []
-
-    if (!debug_bypass_rules) {
-      const resRules = enforcePackingRules(placements, shapedUnits, {
-        // Per-customer cap only if finite; Infinity disables it (handled inside helper)
-        customerUnitCap,
-      })
-      filteredPlacements = resRules.filtered
-      ruleRejected = resRules.rejected
+    if (!planId) {
+      return res
+        .status(400)
+        .json(new Response(400, 'Bad Request', 'Missing parameter: plan_id'))
     }
 
-    // === Idle units (purely informational; not filtered by day caps)
-    let branchNameById = new Map()
-    try {
-      const { data: branchRows } = await database
-        .from('branches')
-        .select('id,name')
-      if (branchRows?.length)
-        branchNameById = new Map(branchRows.map((b) => [String(b.id), b.name]))
-    } catch {}
+    /* --------------------------------------------------------------------- */
+    /* 1) Plan                                                               */
+    /* --------------------------------------------------------------------- */
+    const { data: planRows, error: planError } = await database
+      .from('plans')
+      .select(
+        `
+        id,
+        plan_name,
+        delivery_start,
+        delivery_end,
+        scope_all_branches,
+        status,
+        notes,
+        created_at,
+        updated_at
+      `
+      )
+      .eq('id', planId)
+      .limit(1)
 
-    const usedIdxSetPreview = new Set(filteredPlacements.map((p) => p.unitIdx))
-    const idleUnits = shapedUnits
-      .map((u, idx) => ({ u, idx }))
-      .filter(({ idx }) => !usedIdxSetPreview.has(idx))
-      .map(({ u, idx }) => ({
-        unit_key:
-          u.unit_type === 'rigid'
-            ? `rigid:${u.rigid_id ?? idx}`
-            : u.unit_type === 'horse+trailer'
-            ? `horse:${u.horse_id ?? idx}|trailer:${u.trailer_id ?? idx}`
-            : `unit:${idx}`,
-        unit_type: u.unit_type,
-        driver_id: u.driver_id,
-        driver_name: u.driver_name,
-        fleet_number: u.rigid_fleet || u.horse_fleet || u.trailer_fleet || null,
-        plate: u.rigid_plate || u.horse_plate || u.trailer_plate || null,
-        capacity_kg: Number(u.capacity_kg),
-        capacity_left_kg: state[idx]?.capacity_left ?? Number(u.capacity_kg),
-        length_mm: u.length_mm || 0,
-        category: u.category || '',
-        priority: u.priority || 0,
-        branch_id: u.branch_id ?? null,
-        branch_name: branchNameById.get(String(u.branch_id ?? '')) || null,
-      }))
+    if (planError) {
+      console.error('autoAssignPlanByRoute: planError', planError)
+      return res
+        .status(500)
+        .json(
+          new Response(
+            500,
+            'Server Error',
+            'Error fetching plan: ' + planError.message
+          )
+        )
+    }
 
-    // === PREVIEW
-    if (!commit) {
-      const weightByIdx = sumWeightsByUnitIdx(filteredPlacements)
-      const used = Array.from(weightByIdx.keys())
+    const plan = planRows && planRows[0]
+    if (!plan) {
+      return res
+        .status(404)
+        .json(new Response(404, 'Not Found', 'Plan not found'))
+    }
 
-      const pseudoUnits = used.map((idx, i) => {
-        const u = shapedUnits[idx]
-        const usedKg = weightByIdx.get(idx) || 0
-        return {
-          plan_unit_id: `preview-${i}`,
-          unit_type: u.unit_type,
-          driver_id: u.driver_id,
-          driver_name: u.driver_name,
-          rigid_id: u.rigid_id,
-          rigid_plate: u.rigid_plate,
-          rigid_fleet: u.rigid_fleet,
-          horse_id: u.horse_id,
-          horse_plate: u.horse_plate,
-          horse_fleet: u.horse_fleet,
-          trailer_id: u.trailer_id,
-          trailer_plate: u.trailer_plate,
-          trailer_fleet: u.trailer_fleet,
-          capacity_kg: Number(u.capacity_kg),
-          used_capacity_kg: Number((usedKg || 0).toFixed(3)),
-        }
-      })
+    /* --------------------------------------------------------------------- */
+    /* 2) Unassigned orders in scope (similar to loads-controller)           */
+    /* --------------------------------------------------------------------- */
+    let { data: unassignedRows, error: unassignedError } = await database
+      .from('v_unassigned_orders')
+      .select('*')
+      .eq('plan_id', planId)
 
-      const pseudoAssignments = filteredPlacements.map((p) => {
-        const ordinal = used.indexOf(p.unitIdx)
-        const i = p.item
-        return {
-          assignment_id: `preview-${p.unitIdx}-${i.item_id}`,
-          plan_unit_id: `preview-${ordinal}`,
-          load_id: i.load_id,
-          order_id: i.order_id,
-          item_id: i.item_id,
-          assigned_weight_kg: p.weight,
-          priority_note: 'auto',
-          customer_id: i.customer_id,
-          customer_name: i.customer_name,
-          suburb_name: i.suburb_name,
-          route_name: i.route_name,
-          order_date: i.order_date,
-          description: i.description,
-          order_number: i.order_number ?? null,
-        }
-      })
+    if (unassignedError) {
+      console.error('autoAssignPlanByRoute: unassignedError', unassignedError)
+      return res
+        .status(500)
+        .json(
+          new Response(
+            500,
+            'Server Error',
+            'Error fetching unassigned orders: ' + unassignedError.message
+          )
+        )
+    }
 
-      // rejected (rules) + original unplaced → bucket (preview only, not persisted)
-      const bucket = [
-        ...unplaced,
-        ...ruleRejected.map((p) => ({
-          load_id: p.item.load_id,
-          order_id: p.item.order_id,
-          item_id: p.item.item_id,
-          customer_id: p.item.customer_id,
-          customer_name: p.item.customer_name,
-          suburb_name: p.item.suburb_name,
-          route_name: p.item.route_name,
-          order_date: p.item.order_date,
-          weight_left: p.item.weight_kg,
-          description: p.item.description,
-          reason: 'rule_rejected',
-        })),
-      ]
+    let candidateOrders = (unassignedRows || []).map(shapeOrderRow)
 
-      const nested = buildNested(pseudoUnits, pseudoAssignments, bucket)
-      return res.status(200).json(
-        new Response(200, 'OK', 'Auto-assignment preview (no DB changes)', {
-          plan: {
-            departure_date: dep,
-            cutoff_date: cut,
-            scope_branch_id: branch || null,
-            scope_customer_id: customer || null,
-            commit: false,
-            parameters: {
-              capacity_headroom: `${Math.round(
-                (capacityHeadroom || 0) * 100
-              )}%`,
-              length_buffer_mm: Number(lengthBufferMm || 0),
-              ignore_length_if_missing: !!ignoreLengthIfMissing,
-              ignore_department: !!ignoreDepartment,
-              customer_unit_cap: Number.isFinite(Number(customerUnitCap))
-                ? Number(customerUnitCap)
-                : 'Infinity',
-              route_affinity_slop: routeAffinitySlop,
-              hard_route_lock: true,
-              debug_bypass_rules: !!debug_bypass_rules,
-            },
-          },
-          ...nested,
-          idle_units_by_branch: idleUnits.reduce((acc, x) => {
-            const key = x.branch_id == null ? 'unknown' : String(x.branch_id)
-            if (!acc[key])
-              acc[key] = {
-                branch_id: x.branch_id ?? null,
-                branch_name:
-                  x.branch_name || (x.branch_id == null ? 'Unknown' : null),
-                total_idle: 0,
-                units: [],
-              }
-            acc[key].total_idle += 1
-            acc[key].units.push(x)
-            return acc
-          }, {}),
-        })
+    if (branchIdFilter && branchIdFilter !== 'all') {
+      candidateOrders = candidateOrders.filter(
+        (o) => String(o.branch_id || '') === String(branchIdFilter || '')
       )
     }
 
-    // === COMMIT
-    const planIns = await database
-      .from('assignment_plans')
-      .insert([
-        {
-          departure_date: dep,
-          cutoff_date: cut,
-          scope_branch_id: branch,
-          scope_customer_id: customer || null,
-          notes,
-        },
-      ])
-      .select('*')
-      .single()
-
-    if (planIns.error) throw planIns.error
-    const plan = planIns.data
-
-    // Build raw rows from filtered placements (keep unitIdx)
-    const rawRows = filteredPlacements.map((p) => ({
-      unitIdx: p.unitIdx,
-      load_id: p.item.load_id,
-      order_id: p.item.order_id,
-      item_id: p.item.item_id,
-      assigned_weight_kg: Number(p.weight || 0),
-      priority_note: 'auto',
-      _item: p.item,
-    }))
-
-    // Filter duplicates at DB level to avoid collisions
-    const uniqueIds = [
-      ...new Set(rawRows.map((r) => r.item_id).filter(Boolean)),
-    ]
-    const { data: existing } = await database
-      .from('assignment_plan_item_assignments')
-      .select('item_id')
-      .in('item_id', uniqueIds)
-    const existingIds = new Set((existing || []).map((r) => r.item_id))
-    const rowsToInsert = rawRows.filter(
-      (r) =>
-        r.item_id && !existingIds.has(r.item_id) && r.assigned_weight_kg > 0
-    )
-
-    // Prepare bucket for rejects + unplaced + duplicates/zero-weight
-    const rejectedForBucket = [
-      ...ruleRejected.map((p) => ({
-        load_id: p.item.load_id,
-        order_id: p.item.order_id,
-        item_id: p.item.item_id,
-        order_date: p.item.order_date,
-        weight_left: p.item.weight_kg,
-        reason: 'rule_rejected',
-      })),
-      ...unplaced,
-      ...rawRows
-        .filter((r) => r.item_id && existingIds.has(r.item_id))
-        .map((r) => ({
-          load_id: r.load_id,
-          order_id: r.order_id,
-          item_id: r.item_id,
-          order_date: r._item.order_date,
-          weight_left: r._item.weight_kg,
-          reason: 'already_assigned',
-        })),
-      ...rawRows
-        .filter(
-          (r) =>
-            r.item_id &&
-            !existingIds.has(r.item_id) &&
-            Number(r.assigned_weight_kg) <= 0
-        )
-        .map((r) => ({
-          load_id: r.load_id,
-          order_id: r.order_id,
-          item_id: r.item_id,
-          order_date: r._item.order_date,
-          weight_left: r._item.weight_kg,
-          reason: 'zero_weight',
-        })),
-    ]
-
-    // --- NEW: DEDUPE + UPSERT bucket rows (Option A) ---
-    if (rejectedForBucket.length) {
-      const latestByItem = new Map()
-      for (const r of rejectedForBucket) {
-        if (!r.item_id) continue
-        latestByItem.set(r.item_id, r) // last write wins (simple policy)
-      }
-
-      const bucketRows = Array.from(latestByItem.values())
-        .filter((r) => r.item_id)
-        .map((r) => ({
-          plan_id: plan.id,
-          load_id: r.load_id,
-          order_id: r.order_id,
-          item_id: r.item_id,
-          order_date: r.order_date || null,
-          weight_left: Number(r.weight_left || 0),
-          reason: r.reason || 'unplaced',
-        }))
-
-      if (bucketRows.length) {
-        const { error } = await database
-          .from('assignment_plan_unassigned_items')
-          .upsert(bucketRows, { onConflict: 'plan_id,item_id' })
-        if (error) console.warn('Bucket write failed:', error.message)
-      }
-    }
-    // --- END NEW ---
-
-    // If no assignable rows, return plan + bucket (bucket was already upserted)
-    if (!rowsToInsert.length) {
-      const finalBucket = await fetchUnassignedBucket(plan.id)
+    if (!candidateOrders.length) {
       return res.status(200).json(
         new Response(
           200,
           'OK',
-          'Nothing to assign (duplicates or zero weight). Plan created without units.',
+          'No unassigned orders found for this plan/scope',
           {
             plan,
-            assigned_units: [],
-            unassigned: finalBucket,
+            units: [],
+            assigned_orders: [],
+            unassigned_orders: [],
+            unassigned_units: [],
           }
         )
       )
     }
 
-    // Create plan units ONLY for indices referenced by rowsToInsert
-    const usedIdxSet = new Set(rowsToInsert.map((r) => r.unitIdx))
-    const planUnitIdByIdx = new Map()
+    /* --------------------------------------------------------------------- */
+    /* 3) Already-assigned loads for this plan                               */
+    /* --------------------------------------------------------------------- */
+    const { data: assignedLoadRows, error: assignedLoadsError } = await database
+      .from('loads')
+      .select(
+        `
+          id,
+          sales_order_id,
+          sales_order_number,
+          delivery_date,
+          branch_id,
+          branch_name,
+          route_id,
+          route_name,
+          suburb_route_id,
+          suburb_name,
+          suburb_city,
+          suburb_province,
+          suburb_postal_code,
+          customer_id,
+          customer_name,
+          customer_bp_code,
+          total_line_items,
+          total_quantity,
+          total_weight,
+          status,
+          sales_person_name,
+          address,
+          assignment_plan_id,
+          assigned_unit_id
+        `
+      )
+      .eq('assignment_plan_id', planId)
+      .not('assigned_unit_id', 'is', null)
 
-    // If you keep trip numbers historically, you can still compute "trip_no" without capping:
-    // const latestTrips = await fetchTripsUsedByVehicle(database, dep)
-
-    for (const idx of usedIdxSet) {
-      const u = shapedUnits[idx]
-      if (!u) continue
-
-      const ins = await database
-        .from('assignment_plan_units')
-        .insert([
-          {
-            plan_id: plan.id,
-            unit_type: u.unit_type,
-            rigid_id: u.rigid_id,
-            trailer_id: u.trailer_id,
-            horse_id: u.horse_id,
-            driver_id: u.driver_id,
-            driver_name: u.driver_name,
-            rigid_plate: u.rigid_plate,
-            rigid_fleet: u.rigid_fleet,
-            horse_plate: u.horse_plate,
-            horse_fleet: u.horse_fleet,
-            trailer_plate: u.trailer_plate,
-            trailer_fleet: u.trailer_fleet,
-            capacity_kg: u.capacity_kg,
-            priority: u.priority || 0,
-            branch_id: u.branch_id || null,
-            category: u.category || '',
-            length_mm: u.length_mm || 0,
-            // trip_no: (Number(latestTrips.get(vehicleKey(u)) || 0)) + 1,
-          },
-        ])
-        .select('*')
-        .single()
-
-      if (ins.error) throw ins.error
-      planUnitIdByIdx.set(idx, ins.data.id)
+    if (assignedLoadsError) {
+      console.error(
+        'autoAssignPlanByRoute: assignedLoadsError',
+        assignedLoadsError
+      )
+      return res
+        .status(500)
+        .json(
+          new Response(
+            500,
+            'Server Error',
+            'Error fetching assigned loads: ' + assignedLoadsError.message
+          )
+        )
     }
 
-    // Insert assignments for created plan units
-    const toInsert = rowsToInsert
-      .filter((r) => planUnitIdByIdx.has(r.unitIdx))
-      .map((r) => ({
-        plan_unit_id: planUnitIdByIdx.get(r.unitIdx),
-        load_id: r.load_id,
-        order_id: r.order_id,
-        item_id: r.item_id,
-        assigned_weight_kg: r.assigned_weight_kg,
-        priority_note: r.priority_note,
-      }))
+    const assignedLoads = (assignedLoadRows || []).map(shapeOrderRow)
 
-    const itemsWithoutUnits = rowsToInsert
-      .filter((r) => !planUnitIdByIdx.has(r.unitIdx))
-      .map((r) => ({
-        plan_id: plan.id,
-        load_id: r.load_id,
-        order_id: r.order_id,
-        item_id: r.item_id,
-        order_date: r._item?.order_date || null,
-        weight_left: Number(r._item?.weight_kg || 0),
-        reason: 'unit_creation_failed',
-      }))
+    /* --------------------------------------------------------------------- */
+    /* 4) Planned units                                                      */
+    /* --------------------------------------------------------------------- */
+    const { data: plannedUnitRows, error: plannedUnitsError } = await database
+      .from('planned_units')
+      .select('id, plan_id, vehicle_assignment_id, status, notes')
+      .eq('plan_id', planId)
 
-    if (itemsWithoutUnits.length) {
-      const { error } = await database
-        .from('assignment_plan_unassigned_items')
-        .upsert(itemsWithoutUnits, { onConflict: 'plan_id,item_id' })
-      if (error) console.warn('Unit-failed bucket write failed:', error.message)
+    if (plannedUnitsError) {
+      console.error(
+        'autoAssignPlanByRoute: plannedUnitsError',
+        plannedUnitsError
+      )
+      return res
+        .status(500)
+        .json(
+          new Response(
+            500,
+            'Server Error',
+            'Error fetching planned units: ' + plannedUnitsError.message
+          )
+        )
     }
 
-    if (toInsert.length) {
-      const insA = await insertAssignmentsSafely(database, toInsert)
-      if (insA.error) throw insA.error
-    }
-
-    await recalcUsedCapacity(plan.id)
-
-    const [unitsDb, assignsDb, bucket] = await Promise.all([
-      fetchPlanUnits(plan.id),
-      fetchPlanAssignments(plan.id),
-      fetchUnassignedBucket(plan.id),
-    ])
-
-    return res.status(200).json(
-      new Response(200, 'OK', 'Auto-assignment committed', {
-        plan,
-        ...buildNested(unitsDb, assignsDb, bucket),
-      })
+    let plannedUnits = (plannedUnitRows || []).filter(
+      (u) => !u.status || u.status === 'active'
     )
+
+    /* --------------------------------------------------------------------- */
+    /* 5) Vehicle assignments, vehicles, drivers                             */
+    /* --------------------------------------------------------------------- */
+    const branchIds = new Set()
+    candidateOrders.forEach((o) => {
+      if (o.branch_id) branchIds.add(String(o.branch_id))
+    })
+
+    let vaQuery = database
+      .from('vehicle_assignments')
+      .select(
+        `
+        id,
+        branch_id,
+        vehicle_id,
+        trailer_id,
+        vehicle_type,
+        driver_id,
+        status
+      `
+      )
+      .eq('status', 'active')
+
+    if (branchIds.size > 0) {
+      vaQuery = vaQuery.in('branch_id', Array.from(branchIds))
+    }
+
+    const { data: vaRows, error: vaError } = await vaQuery
+
+    if (vaError) {
+      console.error('autoAssignPlanByRoute: vaError', vaError)
+      return res
+        .status(500)
+        .json(
+          new Response(
+            500,
+            'Server Error',
+            'Error fetching vehicle assignments: ' + vaError.message
+          )
+        )
+    }
+
+    const vehicleAssignments = vaRows || []
+    const vaById = new Map()
+    const availableAssignmentsByBranch = new Map()
+    const driverIdSet = new Set()
+    const vehicleIdSet = new Set()
+
+    vehicleAssignments.forEach((va) => {
+      vaById.set(va.id, va)
+      const bKey = String(va.branch_id || '')
+      if (!availableAssignmentsByBranch.has(bKey)) {
+        availableAssignmentsByBranch.set(bKey, [])
+      }
+      availableAssignmentsByBranch.get(bKey).push(va)
+
+      if (va.vehicle_id) vehicleIdSet.add(va.vehicle_id)
+      if (va.trailer_id) vehicleIdSet.add(va.trailer_id)
+      if (va.driver_id) driverIdSet.add(va.driver_id)
+    })
+
+    // Vehicles
+    const vehiclesById = new Map()
+    if (vehicleIdSet.size > 0) {
+      const { data: vehicleRows, error: vehiclesError } = await database
+        .from('vehicles')
+        .select(
+          `
+          id,
+          type,
+          reg_number,
+          license_plate,
+          plate,
+          model,
+          vehicle_description,
+          capacity,
+          vehicle_category,
+          branch_id,
+          status
+        `
+        )
+        .in('id', Array.from(vehicleIdSet))
+
+      if (vehiclesError) {
+        console.error('autoAssignPlanByRoute: vehiclesError', vehiclesError)
+        return res
+          .status(500)
+          .json(
+            new Response(
+              500,
+              'Server Error',
+              'Error fetching vehicles: ' + vehiclesError.message
+            )
+          )
+      }
+
+      ;(vehicleRows || []).forEach((v) => {
+        vehiclesById.set(v.id, v)
+      })
+    }
+
+    // Drivers
+    const driversById = new Map()
+    if (driverIdSet.size > 0) {
+      const { data: driverRows, error: driversError } = await database
+        .from('drivers')
+        .select(
+          `
+          id,
+          branch_id,
+          name,
+          last_name,
+          phone,
+          email,
+          status,
+          license,
+          license_code
+        `
+        )
+        .in('id', Array.from(driverIdSet))
+
+      if (driversError) {
+        console.error('autoAssignPlanByRoute: driversError', driversError)
+        return res
+          .status(500)
+          .json(
+            new Response(
+              500,
+              'Server Error',
+              'Error fetching drivers: ' + driversError.message
+            )
+          )
+      }
+
+      ;(driverRows || []).forEach((d) => {
+        driversById.set(d.id, d)
+      })
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* 6) Build current unit state                                           */
+    /* --------------------------------------------------------------------- */
+    const loadsByUnit = new Map()
+    const unitUsedWeight = new Map()
+    const routesServed = new Map()
+    const customerDayUnits = new Map()
+    const unitsPerRoute = new Map()
+
+    assignedLoads.forEach((order) => {
+      const unitId = order.assigned_unit_id
+      if (!unitId) return
+
+      if (!loadsByUnit.has(unitId)) loadsByUnit.set(unitId, [])
+      loadsByUnit.get(unitId).push(order)
+
+      const w = toNumber(order.total_weight, 0)
+      unitUsedWeight.set(unitId, (unitUsedWeight.get(unitId) || 0) + w)
+
+      const rSet = routesServed.get(unitId) || new Set()
+      if (order.route_id) rSet.add(order.route_id)
+      routesServed.set(unitId, rSet)
+
+      const custKey = `${order.customer_id || ''}|${order.delivery_date || ''}`
+      const cSet = customerDayUnits.get(custKey) || new Set()
+      cSet.add(unitId)
+      customerDayUnits.set(custKey, cSet)
+
+      if (order.route_id) {
+        const rKey = String(order.route_id)
+        const routeSet = unitsPerRoute.get(rKey) || new Set()
+        routeSet.add(unitId)
+        unitsPerRoute.set(rKey, routeSet)
+      }
+    })
+
+    const units = []
+    const usedVAIds = new Set()
+
+    plannedUnits.forEach((pu) => {
+      const va = vaById.get(pu.vehicle_assignment_id)
+      if (!va) return
+
+      const vehicle = vehiclesById.get(va.vehicle_id) || null
+      const trailer = va.trailer_id
+        ? vehiclesById.get(va.trailer_id) || null
+        : null
+      const driver = va.driver_id ? driversById.get(va.driver_id) || null : null
+
+      // 🚫 BUSINESS RULE: horses without trailers are not usable units
+      if (va.vehicle_type === 'horse' && !trailer) {
+        return
+      }
+
+      const capacityRaw =
+        va.vehicle_type === 'horse' && trailer
+          ? trailer.capacity
+          : vehicle && vehicle.capacity
+      const capacityKg = parseCapacityKg(capacityRaw)
+      const usedWeight = toNumber(unitUsedWeight.get(pu.id), 0)
+      const remainingCapacity =
+        capacityKg === Infinity
+          ? Infinity
+          : Math.max(capacityKg - usedWeight, 0)
+
+      const rSet = routesServed.get(pu.id) || new Set()
+
+      units.push({
+        planned_unit_id: pu.id,
+        plan_id: planId,
+        vehicle_assignment_id: va.id,
+        branch_id: va.branch_id,
+        vehicle_type: va.vehicle_type,
+        vehicle_id: va.vehicle_id,
+        trailer_id: va.trailer_id,
+        driver_id: va.driver_id,
+        driver,
+        vehicle,
+        trailer,
+        capacity_kg: capacityKg,
+        used_weight_kg: usedWeight,
+        remaining_capacity_kg: remainingCapacity,
+        routes_served: rSet,
+        notes: pu.notes || null,
+      })
+
+      usedVAIds.add(va.id)
+    })
+
+    // Remove used VAs from "available" pools
+    for (const [bKey, arr] of availableAssignmentsByBranch.entries()) {
+      const filtered = arr.filter((va) => !usedVAIds.has(va.id))
+      availableAssignmentsByBranch.set(bKey, filtered)
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* 7) Orders map (assigned + candidates)                                 */
+    /* --------------------------------------------------------------------- */
+    const ordersById = new Map()
+    assignedLoads.forEach((o) => {
+      ordersById.set(o.order_id, o)
+    })
+    candidateOrders.forEach((o) => {
+      ordersById.set(o.order_id, o)
+    })
+
+    // Sort candidates by route, then date, then weight desc
+    candidateOrders.sort((a, b) => {
+      const ra = String(a.route_id || '')
+      const rb = String(b.route_id || '')
+      if (ra < rb) return -1
+      if (ra > rb) return 1
+
+      const da = a.delivery_date || ''
+      const db = b.delivery_date || ''
+      if (da < db) return -1
+      if (da > db) return 1
+
+      const wa = toNumber(a.total_weight, 0)
+      const wb = toNumber(b.total_weight, 0)
+      return wb - wa
+    })
+
+    function findCandidateUnitsForOrder(order) {
+      const branchKey = String(order.branch_id || '')
+      const routeId = order.route_id || null
+      const routeKey = String(routeId || '')
+      const weight = toNumber(order.total_weight, 0)
+
+      const routeSet = unitsPerRoute.get(routeKey) || new Set()
+      const custKey = `${order.customer_id || ''}|${order.delivery_date || ''}`
+      const custUnits = customerDayUnits.get(custKey) || new Set()
+
+      const candidates = []
+
+      units.forEach((u) => {
+        if (order.branch_id && String(u.branch_id || '') !== branchKey) {
+          return
+        }
+
+        const remaining = u.remaining_capacity_kg
+        if (remaining <= 0 || remaining < weight) return
+
+        const hasRoutes = u.routes_served.size > 0
+        const servesThisRoute = routeId && u.routes_served.has(routeId)
+
+        // 1 route per vehicle
+        if (hasRoutes && !servesThisRoute) return
+
+        // up to 2 vehicles per route
+        const isNewForRoute = !hasRoutes && routeId
+        if (isNewForRoute && routeSet.size >= 2) return
+
+        const alreadyUnitsForCustomer = custUnits.size
+        const unitAlreadyServingCustomer = custUnits.has(u.planned_unit_id)
+
+        if (
+          !unitAlreadyServingCustomer &&
+          alreadyUnitsForCustomer >= maxUnitsPerCustomerPerDay
+        ) {
+          return
+        }
+
+        candidates.push(u)
+      })
+
+      return {
+        routeKey,
+        routeSet,
+        custKey,
+        custUnits,
+        candidates,
+        weight,
+      }
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* 8) Assign orders                                                      */
+    /* --------------------------------------------------------------------- */
+    const assignments = []
+    const newAssignedOrderIds = new Set()
+
+    for (const order of candidateOrders) {
+      const { routeKey, routeSet, custKey, custUnits, candidates, weight } =
+        findCandidateUnitsForOrder(order)
+
+      let chosenUnit = null
+      let candidateList = candidates
+
+      if (!candidateList.length) {
+        // can we still add a vehicle for this route?
+        if (routeSet.size < 2) {
+          const branchKey = String(order.branch_id || '')
+          const rawAvailableList =
+            availableAssignmentsByBranch.get(branchKey) || []
+
+          // Only keep rigids OR horses that have a trailer
+          const availableList = rawAvailableList.filter(
+            (va) => va.vehicle_type !== 'horse' || va.trailer_id
+          )
+
+          if (availableList.length) {
+            const va = availableList.shift()
+            usedVAIds.add(va.id)
+
+            const { data: newPuRow, error: insertPuError } = await database
+              .from('planned_units')
+              .insert({
+                plan_id: planId,
+                vehicle_assignment_id: va.id,
+                status: 'active',
+              })
+              .select('id, plan_id, vehicle_assignment_id, status, notes')
+              .single()
+
+            if (!insertPuError && newPuRow) {
+              const vehicle = vehiclesById.get(va.vehicle_id) || null
+              const trailer = va.trailer_id
+                ? vehiclesById.get(va.trailer_id) || null
+                : null
+              const driver = va.driver_id
+                ? driversById.get(va.driver_id) || null
+                : null
+
+              const capacityRaw =
+                va.vehicle_type === 'horse' && trailer
+                  ? trailer.capacity
+                  : vehicle && vehicle.capacity
+              const capacityKg = parseCapacityKg(capacityRaw)
+
+              const newUnit = {
+                planned_unit_id: newPuRow.id,
+                plan_id: planId,
+                vehicle_assignment_id: va.id,
+                branch_id: va.branch_id,
+                vehicle_type: va.vehicle_type,
+                vehicle_id: va.vehicle_id,
+                trailer_id: va.trailer_id,
+                driver_id: va.driver_id,
+                driver,
+                vehicle,
+                trailer,
+                capacity_kg: capacityKg,
+                used_weight_kg: 0,
+                remaining_capacity_kg: capacityKg,
+                routes_served: new Set(),
+                notes: newPuRow.notes || null,
+              }
+
+              units.push(newUnit)
+
+              const recalc = findCandidateUnitsForOrder(order)
+              candidateList = recalc.candidates
+            }
+          }
+        }
+      }
+
+      if (!candidateList.length) continue
+
+      let bestResidual = Infinity
+      candidateList.forEach((u) => {
+        const residual = u.remaining_capacity_kg - weight
+        if (residual >= 0 && residual < bestResidual) {
+          bestResidual = residual
+          chosenUnit = u
+        }
+      })
+
+      if (!chosenUnit) continue
+
+      assignments.push({
+        planned_unit_id: chosenUnit.planned_unit_id,
+        order_id: order.order_id,
+      })
+      newAssignedOrderIds.add(order.order_id)
+
+      chosenUnit.used_weight_kg += weight
+      chosenUnit.remaining_capacity_kg =
+        chosenUnit.capacity_kg === Infinity
+          ? Infinity
+          : Math.max(chosenUnit.capacity_kg - chosenUnit.used_weight_kg, 0)
+
+      const routeId = order.route_id || null
+      if (routeId && !chosenUnit.routes_served.has(routeId)) {
+        chosenUnit.routes_served.add(routeId)
+        const rKey = String(routeId || '')
+        const rSet = unitsPerRoute.get(rKey) || new Set()
+        rSet.add(chosenUnit.planned_unit_id)
+        unitsPerRoute.set(rKey, rSet)
+      }
+
+      const cSet = customerDayUnits.get(custKey) || new Set()
+      cSet.add(chosenUnit.planned_unit_id)
+      customerDayUnits.set(custKey, cSet)
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* 9) Commit to DB (optional)                                            */
+    /* --------------------------------------------------------------------- */
+    if (commitFlag && assignments.length > 0) {
+      const ordersByUnitId = new Map()
+      assignments.forEach((a) => {
+        if (!ordersByUnitId.has(a.planned_unit_id)) {
+          ordersByUnitId.set(a.planned_unit_id, new Set())
+        }
+        ordersByUnitId.get(a.planned_unit_id).add(a.order_id)
+      })
+
+      for (const [unitId, orderIdSet] of ordersByUnitId.entries()) {
+        const orderIds = Array.from(orderIdSet)
+
+        const { error: loadsUpdateError } = await database
+          .from('loads')
+          .update({
+            assignment_plan_id: planId,
+            assigned_unit_id: unitId,
+            is_split: false,
+          })
+          .in('id', orderIds)
+
+        if (loadsUpdateError) {
+          console.error(
+            'autoAssignPlanByRoute: loadsUpdateError',
+            loadsUpdateError
+          )
+          return res
+            .status(500)
+            .json(
+              new Response(
+                500,
+                'Server Error',
+                'Error updating loads: ' + loadsUpdateError.message
+              )
+            )
+        }
+
+        const { error: itemsUpdateError } = await database
+          .from('load_items')
+          .update({
+            assignment_plan_id: planId,
+            assigned_unit_id: unitId,
+          })
+          .in('order_id', orderIds)
+
+        if (itemsUpdateError) {
+          console.error(
+            'autoAssignPlanByRoute: itemsUpdateError',
+            itemsUpdateError
+          )
+          return res
+            .status(500)
+            .json(
+              new Response(
+                500,
+                'Server Error',
+                'Error updating load_items: ' + itemsUpdateError.message
+              )
+            )
+        }
+      }
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* 10) Load order lines for ALL orders in scope                          */
+    /* --------------------------------------------------------------------- */
+    const allOrderIds = Array.from(ordersById.keys())
+    if (allOrderIds.length) {
+      const { data: lineRows, error: linesErr } = await database
+        .from('load_items')
+        .select(
+          'order_id, order_line_id, description, lip_channel_quantity, quantity, weight, length, ur_prod, send_to_production'
+        )
+        .in('order_id', allOrderIds)
+
+      if (linesErr) {
+        console.error('autoAssignPlanByRoute: linesErr', linesErr)
+        return res
+          .status(500)
+          .json(
+            new Response(
+              500,
+              'Server Error',
+              'Error fetching load item lines: ' + linesErr.message
+            )
+          )
+      }
+
+      const linesByOrderId = new Map()
+      for (const li of lineRows || []) {
+        if (!linesByOrderId.has(li.order_id)) {
+          linesByOrderId.set(li.order_id, [])
+        }
+        linesByOrderId.get(li.order_id).push({
+          order_line_id: li.order_line_id,
+          description: li.description,
+          lip_channel_quantity: li.lip_channel_quantity,
+          quantity: li.quantity,
+          weight: li.weight,
+          length: li.length,
+          ur_prod: li.ur_prod,
+          send_to_production: li.send_to_production,
+        })
+      }
+
+      // attach lines onto each order in ordersById
+      for (const order of ordersById.values()) {
+        order.lines = linesByOrderId.get(order.order_id) || []
+      }
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* 11) Build response payload from in-memory state                       */
+    /* --------------------------------------------------------------------- */
+    const unitOrdersMap = new Map()
+
+    // existing assigned loads
+    assignedLoads.forEach((order) => {
+      const unitId = order.assigned_unit_id
+      if (!unitId) return
+      if (!unitOrdersMap.has(unitId)) unitOrdersMap.set(unitId, [])
+      unitOrdersMap.get(unitId).push(order)
+    })
+
+    // newly assigned orders
+    assignments.forEach((a) => {
+      const unitId = a.planned_unit_id
+      const order = ordersById.get(a.order_id)
+      if (!order) return
+
+      order.assignment_plan_id = planId
+      order.assigned_unit_id = unitId
+
+      if (!unitOrdersMap.has(unitId)) unitOrdersMap.set(unitId, [])
+      const arr = unitOrdersMap.get(unitId)
+      if (!arr.find((o) => o.order_id === order.order_id)) {
+        arr.push(order)
+      }
+    })
+
+    const assignedOrdersMap = new Map()
+    for (const arr of unitOrdersMap.values()) {
+      arr.forEach((o) => {
+        assignedOrdersMap.set(o.order_id, o)
+      })
+    }
+
+    const unassignedOrders = candidateOrders.filter((o) => {
+      return !assignments.find((a) => a.order_id === o.order_id)
+    })
+
+    const unitsPayload = units.map((u) => {
+      const ordersForUnit = unitOrdersMap.get(u.planned_unit_id) || []
+
+      let totalOrders = ordersForUnit.length
+      let totalLineItems = 0
+      let totalQty = 0
+      let totalWeight = 0
+
+      ordersForUnit.forEach((order) => {
+        totalLineItems += toNumber(order.total_line_items, 0)
+        totalQty += toNumber(order.total_quantity, 0)
+        totalWeight += toNumber(order.total_weight, 0)
+      })
+
+      const driver = u.driver
+        ? {
+            id: u.driver.id,
+            branch_id: u.driver.branch_id,
+            name: u.driver.name,
+            last_name: u.driver.last_name,
+            phone: u.driver.phone,
+            email: u.driver.email,
+            status: u.driver.status,
+            license: u.driver.license,
+            license_code: u.driver.license_code,
+          }
+        : null
+
+      const vehicle = u.vehicle
+        ? {
+            id: u.vehicle.id,
+            type: u.vehicle.type,
+            reg_number: u.vehicle.reg_number,
+            license_plate: u.vehicle.license_plate,
+            plate: u.vehicle.plate,
+            model: u.vehicle.model,
+            vehicle_description: u.vehicle.vehicle_description,
+            capacity: u.vehicle.capacity,
+            branch_id: u.vehicle.branch_id,
+            status: u.vehicle.status,
+          }
+        : null
+
+      const trailer = u.trailer
+        ? {
+            id: u.trailer.id,
+            type: u.trailer.type,
+            reg_number: u.trailer.reg_number,
+            license_plate: u.trailer.license_plate,
+            plate: u.trailer.plate,
+            model: u.trailer.model,
+            vehicle_description: u.trailer.vehicle_description,
+            capacity: u.trailer.capacity,
+            branch_id: u.trailer.branch_id,
+            status: u.trailer.status,
+          }
+        : null
+
+      return {
+        planned_unit_id: u.planned_unit_id,
+        plan_id: u.plan_id,
+        vehicle_assignment_id: u.vehicle_assignment_id,
+        branch_id: u.branch_id,
+        vehicle_type: u.vehicle_type,
+        vehicle_id: u.vehicle_id,
+        trailer_id: u.trailer_id,
+        driver_id: u.driver_id,
+        driver,
+        vehicle,
+        trailer,
+        capacity_kg: u.capacity_kg,
+        used_weight_kg: u.used_weight_kg,
+        remaining_capacity_kg: u.remaining_capacity_kg,
+        routes_served: Array.from(u.routes_served || []),
+        notes: u.notes || null,
+        summary: {
+          total_orders: totalOrders,
+          total_line_items: totalLineItems,
+          total_quantity: totalQty,
+          total_weight: totalWeight,
+        },
+        orders: ordersForUnit,
+      }
+    })
+
+    const unassignedUnits = unitsPayload.filter(
+      (u) => !u.orders || u.orders.length === 0
+    )
+
+    const payload = {
+      plan,
+      units: unitsPayload,
+      assigned_orders: Array.from(assignedOrdersMap.values()),
+      unassigned_orders: unassignedOrders,
+      unassigned_units: unassignedUnits,
+      meta: {
+        committed: commitFlag,
+        assignments_created: assignments.length,
+        max_units_per_customer_per_day: maxUnitsPerCustomerPerDay,
+      },
+    }
+
+    const message = commitFlag
+      ? 'Auto-assignment committed successfully'
+      : 'Auto-assignment preview generated successfully'
+
+    return res.status(200).json(new Response(200, 'OK', message, payload))
   } catch (err) {
-    return res.status(500).json(new Response(500, 'Server Error', err.message))
+    console.error('autoAssignPlanByRoute: unexpected error', err)
+    return res
+      .status(500)
+      .json(
+        new Response(
+          500,
+          'Server Error',
+          err.message || 'Unexpected server error'
+        )
+      )
   }
 }

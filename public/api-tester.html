@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Allied Server API Tester</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header { background: #2c3e50; color: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; }
+        .auth-section { background: white; padding: 20px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .group { background: white; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); overflow: hidden; }
+        .group-header { padding: 15px; cursor: pointer; background: #f8f9fa; border-bottom: 1px solid #eee; font-weight: bold; color: #495057; }
+        .group-header:hover { background: #e9ecef; }
+        .group-body { display: none; }
+        .endpoint { margin-bottom: 10px; border-radius: 6px; border: 1px solid #eee; overflow: hidden; }
+        .endpoint-header { padding: 12px; cursor: pointer; display: flex; align-items: center; gap: 10px; background: #fafafa; }
+        .endpoint-header:hover { background: #f0f0f0; }
+        .method { padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 12px; }
+        .GET { background: #e8f5e8; color: #2e7d32; }
+        .POST { background: #e3f2fd; color: #1976d2; }
+        .PUT { background: #fff3e0; color: #f57c00; }
+        .DELETE { background: #ffebee; color: #d32f2f; }
+        .endpoint-body { padding: 15px; border-top: 1px solid #eee; display: none; background: white; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: 500; }
+        input, textarea, select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        textarea { height: 100px; font-family: monospace; }
+        button { background: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #0056b3; }
+        .response { margin-top: 15px; padding: 15px; background: #f8f9fa; border-radius: 4px; border-left: 4px solid #007bff; }
+        .json-viewer { font-family: monospace; font-size: 12px; line-height: 1.4; }
+        .json-key { color: #0451a5; font-weight: bold; }
+        .json-string { color: #0a8043; }
+        .json-number { color: #098658; }
+        .json-boolean { color: #0000ff; }
+        .json-null { color: #795e26; }
+        .json-toggle { cursor: pointer; user-select: none; color: #666; margin-right: 5px; }
+        .json-collapsed { display: none; }
+        .json-object, .json-array { margin-left: 20px; }
+        .token-display { background: #e8f5e8; padding: 10px; border-radius: 4px; margin-top: 10px; font-family: monospace; font-size: 12px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Allied Server API Tester</h1>
+            <p>Test your client routes with this Swagger-like interface</p>
+        </div>
+
+        <div class="auth-section">
+            <h3>Authentication</h3>
+            <div class="form-group">
+                <label>Email:</label>
+                <input type="email" id="authEmail" placeholder="Enter email">
+            </div>
+            <div class="form-group">
+                <label>Password:</label>
+                <input type="password" id="authPassword" placeholder="Enter password">
+            </div>
+            <button onclick="login()">Login</button>
+            <button onclick="logout()" style="background: #dc3545; margin-left: 10px;">Logout</button>
+            <div id="tokenDisplay" class="token-display" style="display: none;"></div>
+        </div>
+
+        <div id="groups"></div>
+    </div>
+
+    <script>
+        let authToken = localStorage.getItem('authToken') || '';
+        const baseUrl = window.location.origin;
+
+        const endpointGroups = {
+            'Authentication': [
+                { method: 'POST', path: '/api/login', name: 'Login', requiresAuth: false, body: { email: 'user@example.com', password: 'password' } },
+                { method: 'POST', path: '/api/refresh', name: 'Refresh Token', requiresAuth: false, body: { refresh_token: '' } },
+                { method: 'POST', path: '/api/logout', name: 'Logout', requiresAuth: false, body: { refresh_token: '', global: false } }
+            ],
+            'Branches': [
+                { method: 'GET', path: '/api/branches', name: 'Get All Branches', requiresAuth: true },
+                { method: 'GET', path: '/api/branches/:id', name: 'Get Branch by ID', requiresAuth: true, params: ['id'] },
+                { method: 'POST', path: '/api/branches', name: 'Create Branch', requiresAuth: true, body: { name: 'Branch Name', address: '123 Main St', phone: '+1234567890', city: 'City', province: 'Province', postal_code: '12345' } },
+                { method: 'PUT', path: '/api/branches/:id', name: 'Update Branch', requiresAuth: true, params: ['id'], body: { name: 'Updated Branch', address: '456 Oak Ave', phone: '+0987654321' } },
+                { method: 'DELETE', path: '/api/branches/:id', name: 'Delete Branch', requiresAuth: true, params: ['id'] }
+            ],
+            'Users': [
+                { method: 'GET', path: '/api/users', name: 'Get All Users', requiresAuth: true },
+                { method: 'GET', path: '/api/users/:id', name: 'Get User by ID', requiresAuth: true, params: ['id'] },
+                { method: 'POST', path: '/api/users', name: 'Create User', requiresAuth: true, body: { email: 'newuser@example.com', password: 'password123', name: 'John', last_name: 'Doe', role: 'user', branch_id: '', phone: '+1234567890', department: 'Operations', position: 'Manager' } },
+                { method: 'PUT', path: '/api/users/:id', name: 'Update User', requiresAuth: true, params: ['id'], body: { name: 'Updated Name', role: 'admin', phone: '+0987654321' } },
+                { method: 'DELETE', path: '/api/users/:id', name: 'Delete User', requiresAuth: true, params: ['id'] }
+            ],
+            'Routes': [
+                { method: 'GET', path: '/api/routes', name: 'Get All Routes', requiresAuth: true },
+                { method: 'GET', path: '/api/routes/:id', name: 'Get Route by ID', requiresAuth: true, params: ['id'] },
+                { method: 'POST', path: '/api/routes', name: 'Create Route', requiresAuth: true, body: { name: 'Route Name', description: 'Route description', branch_id: '', status: 'active', route_suburbs: [{ position: 1, suburb_name: 'Suburb', city: 'City', province: 'Province', postal_code: '12345' }] } },
+                { method: 'PUT', path: '/api/routes/:id', name: 'Update Route', requiresAuth: true, params: ['id'], body: { name: 'Updated Route', description: 'Updated description', status: 'active' } },
+                { method: 'DELETE', path: '/api/routes/:id', name: 'Delete Route', requiresAuth: true, params: ['id'] }
+            ],
+            'Customers': [
+                { method: 'POST', path: '/api/customers', name: 'Create Customer', requiresAuth: false, body: { bp_code: 'BP001', customer_name: 'Customer Name', address: '123 Customer St', phone: '+1234567890', email: 'customer@example.com' } },
+                { method: 'GET', path: '/api/customers', name: 'Get All Customers', requiresAuth: false },
+                { method: 'GET', path: '/api/customers/:id', name: 'Get Customer by ID', requiresAuth: false, params: ['id'] },
+                { method: 'PUT', path: '/api/customers/:id', name: 'Update Customer', requiresAuth: false, params: ['id'], body: { customer_name: 'Updated Customer', phone: '+0987654321' } },
+                { method: 'DELETE', path: '/api/customers/:id', name: 'Delete Customer', requiresAuth: false, params: ['id'] }
+            ],
+            'Drivers': [
+                { method: 'GET', path: '/api/drivers', name: 'Get All Drivers', requiresAuth: true },
+                { method: 'GET', path: '/api/drivers/:id', name: 'Get Driver by ID', requiresAuth: true, params: ['id'] },
+                { method: 'POST', path: '/api/drivers', name: 'Create Driver', requiresAuth: true, body: { branch_id: '', name: 'John', last_name: 'Driver', identity_number: '1234567890', phone: '+1234567890', email: 'driver@example.com', license_type: 'C', license: 'DL123456', license_expiry: '2025-12-31', status: 'active' } },
+                { method: 'PUT', path: '/api/drivers/:id', name: 'Update Driver', requiresAuth: true, params: ['id'], body: { name: 'Updated Driver', phone: '+0987654321', status: 'active' } },
+                { method: 'DELETE', path: '/api/drivers/:id', name: 'Delete Driver', requiresAuth: true, params: ['id'] }
+            ],
+            'Vehicles': [
+                { method: 'GET', path: '/api/vehicles', name: 'Get All Vehicles', requiresAuth: true },
+                { method: 'GET', path: '/api/vehicles/:id', name: 'Get Vehicle by ID', requiresAuth: true, params: ['id'] },
+                { method: 'POST', path: '/api/vehicles', name: 'Create Vehicle', requiresAuth: true, body: { branch_id: '', type: 'truck', reg_number: 'REG123', license_plate: 'ABC123GP', model: 'Truck Model', year: 2023, capacity: '5000', status: 'active', fuel_type: 'diesel' } },
+                { method: 'PUT', path: '/api/vehicles/:id', name: 'Update Vehicle', requiresAuth: true, params: ['id'], body: { status: 'active', capacity: '6000' } },
+                { method: 'DELETE', path: '/api/vehicles/:id', name: 'Delete Vehicle', requiresAuth: true, params: ['id'] }
+            ],
+            'SAP & Loads': [
+                { method: 'GET', path: '/api/orders', name: 'Get Sales Orders', requiresAuth: true },
+                { method: 'GET', path: '/api/loads', name: 'Get Loads', requiresAuth: true }
+            ],
+            'Assignment Planner': [
+                { method: 'POST', path: '/api/plans/auto-assign', name: 'Auto Assign Loads', requiresAuth: true, body: { plan_id: '', branch_id: 'all', commit: false, max_units_per_customer_per_day: 2 } },
+                { method: 'POST', path: '/api/plans/add-plan', name: 'Add Plan', requiresAuth: true, body: { plan_name: 'New Plan', delivery_start: '2024-01-01', delivery_end: '2024-01-01', scope_all_branches: true, notes: 'Plan notes', status: 'planning' } },
+                { method: 'GET', path: '/api/plans', name: 'Get All Plans', requiresAuth: true },
+                { method: 'GET', path: '/api/plans/:plan_id', name: 'Get Plan', requiresAuth: true, params: ['plan_id'] },
+                { method: 'POST', path: '/api/plans/:plan_id/units', name: 'Add Idle Unit', requiresAuth: true, params: ['plan_id'], body: { plan_id: '', vehicle_assignment_id: '', status: 'active', notes: null } },
+                { method: 'POST', path: '/api/plans/:planId/bulk-assign', name: 'Bulk Assign', requiresAuth: true, params: ['planId'], body: { plan_id: '', assignments: [{ planned_unit_id: '', orders: [{ order_id: '' }] }] } },
+                { method: 'POST', path: '/api/plans/:planId/unassign', name: 'Unassign', requiresAuth: true, params: ['planId'], body: { plan_id: '', planned_unit_id: '', order_ids: [] } },
+                { method: 'DELETE', path: '/api/plans/:planId', name: 'Delete Plan', requiresAuth: true, params: ['planId'] },
+                { method: 'POST', path: '/api/plans/units/note', name: 'Set Unit Note', requiresAuth: true, body: { plan_id: '', planned_unit_id: '', note: 'Unit note' } },
+                { method: 'POST', path: '/api/plans/units/remove', name: 'Remove Planned Unit', requiresAuth: true, body: { plan_id: '', planned_unit_id: '' } }
+            ]
+        };
+
+        function renderGroups() {
+            const container = document.getElementById('groups');
+            let endpointIndex = 0;
+            
+            container.innerHTML = Object.entries(endpointGroups).map(([groupName, endpoints]) => {
+                const groupId = groupName.replace(/\s+/g, '-').toLowerCase();
+                const groupHtml = `
+                    <div class="group">
+                        <div class="group-header" onclick="toggleGroup('${groupId}')">
+                            📁 ${groupName} (${endpoints.length} endpoints)
+                        </div>
+                        <div class="group-body" id="group-${groupId}">
+                            ${endpoints.map(endpoint => {
+                                const currentIndex = endpointIndex++;
+                                return `
+                                    <div class="endpoint">
+                                        <div class="endpoint-header" onclick="toggleEndpoint(${currentIndex})">
+                                            <span class="method ${endpoint.method}">${endpoint.method}</span>
+                                            <span>${endpoint.path}</span>
+                                            <span style="margin-left: auto; color: #666;">${endpoint.name}</span>
+                                            ${endpoint.requiresAuth ? '<span style="color: #f57c00; font-size: 12px;">🔒</span>' : ''}
+                                        </div>
+                                        <div class="endpoint-body" id="endpoint-${currentIndex}">
+                                            ${endpoint.params ? endpoint.params.map(param => `
+                                                <div class="form-group">
+                                                    <label>${param}:</label>
+                                                    <input type="text" id="param-${currentIndex}-${param}" placeholder="Enter ${param}">
+                                                </div>
+                                            `).join('') : ''}
+                                            ${endpoint.body ? `
+                                                <div class="form-group">
+                                                    <label>Request Body (JSON):</label>
+                                                    <textarea id="body-${currentIndex}" placeholder="Enter JSON body">${JSON.stringify(endpoint.body, null, 2)}</textarea>
+                                                </div>
+                                            ` : ''}
+                                            <button onclick="makeRequest(${currentIndex})">Send Request</button>
+                                            <div id="response-${currentIndex}" class="response" style="display: none;"></div>
+                                        </div>
+                                    </div>
+                                `;
+                            }).join('')}
+                        </div>
+                    </div>
+                `;
+                return groupHtml;
+            }).join('');
+        }
+        
+        function toggleGroup(groupId) {
+            const body = document.getElementById(`group-${groupId}`);
+            body.style.display = body.style.display === 'none' ? 'block' : 'none';
+        }
+
+        function toggleEndpoint(index) {
+            const body = document.getElementById(`endpoint-${index}`);
+            body.style.display = body.style.display === 'none' ? 'block' : 'none';
+        }
+
+        async function login() {
+            const email = document.getElementById('authEmail').value;
+            const password = document.getElementById('authPassword').value;
+            
+            try {
+                const response = await fetch(`${baseUrl}/api/login`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ email, password })
+                });
+                
+                const data = await response.json();
+                if (response.ok && data.access_token) {
+                    authToken = data.access_token;
+                    localStorage.setItem('authToken', authToken);
+                    document.getElementById('tokenDisplay').style.display = 'block';
+                    document.getElementById('tokenDisplay').textContent = `Token: ${authToken.substring(0, 50)}...`;
+                    alert('Login successful!');
+                } else {
+                    alert('Login failed: ' + (data.message || 'Unknown error'));
+                }
+            } catch (error) {
+                alert('Login error: ' + error.message);
+            }
+        }
+
+        function logout() {
+            authToken = '';
+            localStorage.removeItem('authToken');
+            document.getElementById('tokenDisplay').style.display = 'none';
+            alert('Logged out successfully!');
+        }
+
+        function createJsonViewer(obj, level = 0) {
+            if (obj === null) return '<span class="json-null">null</span>';
+            if (typeof obj === 'string') return `<span class="json-string">"${obj}"</span>`;
+            if (typeof obj === 'number') return `<span class="json-number">${obj}</span>`;
+            if (typeof obj === 'boolean') return `<span class="json-boolean">${obj}</span>`;
+            
+            const isArray = Array.isArray(obj);
+            const entries = isArray ? obj.map((v, i) => [i, v]) : Object.entries(obj);
+            const openBrace = isArray ? '[' : '{';
+            const closeBrace = isArray ? ']' : '}';
+            
+            if (entries.length === 0) return `${openBrace}${closeBrace}`;
+            
+            const toggleId = `toggle-${Math.random().toString(36).substr(2, 9)}`;
+            const contentId = `content-${Math.random().toString(36).substr(2, 9)}`;
+            
+            let html = `<span class="json-toggle" onclick="toggleJson('${contentId}', this)">▼</span>${openBrace}`;
+            html += `<div id="${contentId}" class="${isArray ? 'json-array' : 'json-object'}">`;
+            
+            entries.forEach(([key, value], index) => {
+                const keyDisplay = isArray ? '' : `<span class="json-key">"${key}"</span>: `;
+                const comma = index < entries.length - 1 ? ',' : '';
+                html += `<div>${keyDisplay}${createJsonViewer(value, level + 1)}${comma}</div>`;
+            });
+            
+            html += `</div>${closeBrace}`;
+            return html;
+        }
+        
+        function toggleJson(contentId, toggle) {
+            const content = document.getElementById(contentId);
+            if (content.style.display === 'none') {
+                content.style.display = 'block';
+                toggle.textContent = '▼';
+            } else {
+                content.style.display = 'none';
+                toggle.textContent = '▶';
+            }
+        }
+        
+        function getAllEndpoints() {
+            const allEndpoints = [];
+            Object.values(endpointGroups).forEach(group => {
+                allEndpoints.push(...group);
+            });
+            return allEndpoints;
+        }
+        
+        async function makeRequest(index) {
+            const endpoints = getAllEndpoints();
+            const endpoint = endpoints[index];
+            let url = baseUrl + endpoint.path;
+            
+            // Replace path parameters
+            if (endpoint.params) {
+                endpoint.params.forEach(param => {
+                    const value = document.getElementById(`param-${index}-${param}`).value;
+                    url = url.replace(`:${param}`, value);
+                });
+            }
+            
+            const headers = { 'Content-Type': 'application/json' };
+            if (endpoint.requiresAuth && authToken) {
+                headers['Authorization'] = `Bearer ${authToken}`;
+            }
+            
+            const options = { method: endpoint.method, headers };
+            
+            if (endpoint.body && ['POST', 'PUT'].includes(endpoint.method)) {
+                const bodyText = document.getElementById(`body-${index}`).value;
+                try {
+                    options.body = bodyText ? JSON.stringify(JSON.parse(bodyText)) : '{}';
+                } catch (e) {
+                    alert('Invalid JSON in request body');
+                    return;
+                }
+            }
+            
+            try {
+                const response = await fetch(url, options);
+                let data;
+                try {
+                    data = await response.json();
+                } catch (e) {
+                    data = await response.text();
+                }
+                
+                const responseDiv = document.getElementById(`response-${index}`);
+                responseDiv.style.display = 'block';
+                
+                if (typeof data === 'object') {
+                    responseDiv.innerHTML = `
+                        <strong>Status: ${response.status} ${response.statusText}</strong>
+                        <div class="json-viewer">${createJsonViewer(data)}</div>
+                    `;
+                } else {
+                    responseDiv.innerHTML = `
+                        <strong>Status: ${response.status} ${response.statusText}</strong>
+                        <pre>${data}</pre>
+                    `;
+                }
+            } catch (error) {
+                const responseDiv = document.getElementById(`response-${index}`);
+                responseDiv.style.display = 'block';
+                responseDiv.innerHTML = `<strong>Error:</strong><pre>${error.message}</pre>`;
+            }
+        }
+
+        // Initialize
+        if (authToken) {
+            document.getElementById('tokenDisplay').style.display = 'block';
+            document.getElementById('tokenDisplay').textContent = `Token: ${authToken.substring(0, 50)}...`;
+        }
+        renderGroups();
+    </script>
+</body>
+</html>

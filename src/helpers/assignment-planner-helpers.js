@@ -785,6 +785,8 @@ export async function fetchItems(cutoffDate, branchId, customerId) {
   })
 }
 
+
+
 export async function enrichBucketDetails(bucketRows) {
   const bucket = bucketRows || []
   if (!bucket.length) return bucket
