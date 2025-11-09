@@ -559,8 +559,8 @@ export const autoAssignLoads = async (req, res) => {
         if (hasRoutes && !servesThisRoute) return
 
         // up to 2 vehicles per route
-        const isNewForRoute = !hasRoutes && routeId
-        if (isNewForRoute && routeSet.size >= 2) return
+        // const isNewForRoute = !hasRoutes && routeId
+        // if (isNewForRoute && routeSet.size >= 2) return
 
         const alreadyUnitsForCustomer = custUnits.size
         const unitAlreadyServingCustomer = custUnits.has(u.planned_unit_id)
@@ -598,71 +598,137 @@ export const autoAssignLoads = async (req, res) => {
       let chosenUnit = null
       let candidateList = candidates
 
+      // if (!candidateList.length) {
+      //   // can we still add a vehicle for this route?
+      //   if (routeSet.size < 2) {
+      //     const branchKey = String(order.branch_id || '')
+      //     const rawAvailableList =
+      //       availableAssignmentsByBranch.get(branchKey) || []
+
+      //     // Only keep rigids OR horses that have a trailer
+      //     const availableList = rawAvailableList.filter(
+      //       (va) => va.vehicle_type !== 'horse' || va.trailer_id
+      //     )
+
+      //     if (availableList.length) {
+      //       const va = availableList.shift()
+      //       usedVAIds.add(va.id)
+
+      //       const { data: newPuRow, error: insertPuError } = await database
+      //         .from('planned_units')
+      //         .insert({
+      //           plan_id: planId,
+      //           vehicle_assignment_id: va.id,
+      //           status: 'active',
+      //         })
+      //         .select('id, plan_id, vehicle_assignment_id, status, notes')
+      //         .single()
+
+      //       if (!insertPuError && newPuRow) {
+      //         const vehicle = vehiclesById.get(va.vehicle_id) || null
+      //         const trailer = va.trailer_id
+      //           ? vehiclesById.get(va.trailer_id) || null
+      //           : null
+      //         const driver = va.driver_id
+      //           ? driversById.get(va.driver_id) || null
+      //           : null
+
+      //         const capacityRaw =
+      //           va.vehicle_type === 'horse' && trailer
+      //             ? trailer.capacity
+      //             : vehicle && vehicle.capacity
+      //         const capacityKg = parseCapacityKg(capacityRaw)
+
+      //         const newUnit = {
+      //           planned_unit_id: newPuRow.id,
+      //           plan_id: planId,
+      //           vehicle_assignment_id: va.id,
+      //           branch_id: va.branch_id,
+      //           vehicle_type: va.vehicle_type,
+      //           vehicle_id: va.vehicle_id,
+      //           trailer_id: va.trailer_id,
+      //           driver_id: va.driver_id,
+      //           driver,
+      //           vehicle,
+      //           trailer,
+      //           capacity_kg: capacityKg,
+      //           used_weight_kg: 0,
+      //           remaining_capacity_kg: capacityKg,
+      //           routes_served: new Set(),
+      //           notes: newPuRow.notes || null,
+      //         }
+
+      //         units.push(newUnit)
+
+      //         const recalc = findCandidateUnitsForOrder(order)
+      //         candidateList = recalc.candidates
+      //       }
+      //     }
+      //   }
+      // }
       if (!candidateList.length) {
-        // can we still add a vehicle for this route?
-        if (routeSet.size < 2) {
-          const branchKey = String(order.branch_id || '')
-          const rawAvailableList =
-            availableAssignmentsByBranch.get(branchKey) || []
+        // ❌ no more limit per route – just try to add a new unit if available
+        const branchKey = String(order.branch_id || '')
+        const rawAvailableList =
+          availableAssignmentsByBranch.get(branchKey) || []
 
-          // Only keep rigids OR horses that have a trailer
-          const availableList = rawAvailableList.filter(
-            (va) => va.vehicle_type !== 'horse' || va.trailer_id
-          )
+        // Only keep rigids OR horses that have a trailer
+        const availableList = rawAvailableList.filter(
+          (va) => va.vehicle_type !== 'horse' || va.trailer_id
+        )
 
-          if (availableList.length) {
-            const va = availableList.shift()
-            usedVAIds.add(va.id)
+        if (availableList.length) {
+          const va = availableList.shift()
+          usedVAIds.add(va.id)
 
-            const { data: newPuRow, error: insertPuError } = await database
-              .from('planned_units')
-              .insert({
-                plan_id: planId,
-                vehicle_assignment_id: va.id,
-                status: 'active',
-              })
-              .select('id, plan_id, vehicle_assignment_id, status, notes')
-              .single()
+          const { data: newPuRow, error: insertPuError } = await database
+            .from('planned_units')
+            .insert({
+              plan_id: planId,
+              vehicle_assignment_id: va.id,
+              status: 'active',
+            })
+            .select('id, plan_id, vehicle_assignment_id, status, notes')
+            .single()
 
-            if (!insertPuError && newPuRow) {
-              const vehicle = vehiclesById.get(va.vehicle_id) || null
-              const trailer = va.trailer_id
-                ? vehiclesById.get(va.trailer_id) || null
-                : null
-              const driver = va.driver_id
-                ? driversById.get(va.driver_id) || null
-                : null
+          if (!insertPuError && newPuRow) {
+            const vehicle = vehiclesById.get(va.vehicle_id) || null
+            const trailer = va.trailer_id
+              ? vehiclesById.get(va.trailer_id) || null
+              : null
+            const driver = va.driver_id
+              ? driversById.get(va.driver_id) || null
+              : null
 
-              const capacityRaw =
-                va.vehicle_type === 'horse' && trailer
-                  ? trailer.capacity
-                  : vehicle && vehicle.capacity
-              const capacityKg = parseCapacityKg(capacityRaw)
+            const capacityRaw =
+              va.vehicle_type === 'horse' && trailer
+                ? trailer.capacity
+                : vehicle && vehicle.capacity
+            const capacityKg = parseCapacityKg(capacityRaw)
 
-              const newUnit = {
-                planned_unit_id: newPuRow.id,
-                plan_id: planId,
-                vehicle_assignment_id: va.id,
-                branch_id: va.branch_id,
-                vehicle_type: va.vehicle_type,
-                vehicle_id: va.vehicle_id,
-                trailer_id: va.trailer_id,
-                driver_id: va.driver_id,
-                driver,
-                vehicle,
-                trailer,
-                capacity_kg: capacityKg,
-                used_weight_kg: 0,
-                remaining_capacity_kg: capacityKg,
-                routes_served: new Set(),
-                notes: newPuRow.notes || null,
-              }
-
-              units.push(newUnit)
-
-              const recalc = findCandidateUnitsForOrder(order)
-              candidateList = recalc.candidates
+            const newUnit = {
+              planned_unit_id: newPuRow.id,
+              plan_id: planId,
+              vehicle_assignment_id: va.id,
+              branch_id: va.branch_id,
+              vehicle_type: va.vehicle_type,
+              vehicle_id: va.vehicle_id,
+              trailer_id: va.trailer_id,
+              driver_id: va.driver_id,
+              driver,
+              vehicle,
+              trailer,
+              capacity_kg: capacityKg,
+              used_weight_kg: 0,
+              remaining_capacity_kg: capacityKg,
+              routes_served: new Set(),
+              notes: newPuRow.notes || null,
             }
+
+            units.push(newUnit)
+
+            const recalc = findCandidateUnitsForOrder(order)
+            candidateList = recalc.candidates
           }
         }
       }
@@ -949,12 +1015,101 @@ export const autoAssignLoads = async (req, res) => {
       (u) => !u.orders || u.orders.length === 0
     )
 
+    // Build available_vehicle_assignments for the UI
+    const availableVehicleAssignments = []
+
+    for (const [branchKey, vaList] of availableAssignmentsByBranch.entries()) {
+      for (const va of vaList) {
+        // Skip any VAs that ended up being used later in the loop
+        if (usedVAIds.has(va.id)) continue
+
+        const vehicle = va.vehicle_id
+          ? vehiclesById.get(va.vehicle_id) || null
+          : null
+        const trailer = va.trailer_id
+          ? vehiclesById.get(va.trailer_id) || null
+          : null
+        const driver = va.driver_id
+          ? driversById.get(va.driver_id) || null
+          : null
+
+        availableVehicleAssignments.push({
+          id: va.id,
+          branch_id: va.branch_id,
+          vehicle_type: va.vehicle_type,
+          vehicle_id: va.vehicle_id,
+          trailer_id: va.trailer_id,
+          driver_id: va.driver_id,
+          status: va.status,
+
+          driver: driver
+            ? {
+                id: driver.id,
+                branch_id: driver.branch_id,
+                name: driver.name,
+                last_name: driver.last_name,
+                phone: driver.phone,
+                email: driver.email,
+                status: driver.status,
+                license: driver.license,
+                license_code: driver.license_code,
+              }
+            : null,
+
+          vehicle: vehicle
+            ? {
+                id: vehicle.id,
+                type: vehicle.type,
+                reg_number: vehicle.reg_number,
+                license_plate: vehicle.license_plate,
+                plate: vehicle.plate,
+                model: vehicle.model,
+                vehicle_description: vehicle.vehicle_description,
+                capacity: vehicle.capacity,
+                branch_id: vehicle.branch_id,
+                status: vehicle.status,
+              }
+            : null,
+
+          trailer: trailer
+            ? {
+                id: trailer.id,
+                type: trailer.type,
+                reg_number: trailer.reg_number,
+                license_plate: trailer.license_plate,
+                plate: trailer.plate,
+                model: trailer.model,
+                vehicle_description: trailer.vehicle_description,
+                capacity: trailer.capacity,
+                branch_id: trailer.branch_id,
+                status: trailer.status,
+              }
+            : null,
+        })
+      }
+    }
+
+    // const payload = {
+    //   plan,
+    //   units: unitsPayload,
+    //   assigned_orders: Array.from(assignedOrdersMap.values()),
+    //   unassigned_orders: unassignedOrders,
+    //   unassigned_units: unassignedUnits,
+    //   meta: {
+    //     committed: commitFlag,
+    //     assignments_created: assignments.length,
+    //     max_units_per_customer_per_day: maxUnitsPerCustomerPerDay,
+    //   },
+    // }
+
     const payload = {
       plan,
       units: unitsPayload,
       assigned_orders: Array.from(assignedOrdersMap.values()),
       unassigned_orders: unassignedOrders,
-      unassigned_units: unassignedUnits,
+      // unassigned_units: unassignedUnits,
+      unassigned_units: availableVehicleAssignments,
+      //available_vehicle_assignments: availableVehicleAssignments, // 👈 NEW
       meta: {
         committed: commitFlag,
         assignments_created: assignments.length,
