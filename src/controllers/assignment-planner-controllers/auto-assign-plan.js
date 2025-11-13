@@ -1232,11 +1232,23 @@ export const autoAssignLoads = async (req, res) => {
       2
     )
 
+    console.log('🚀 AUTO-ASSIGN PROCESS STARTED')
+    console.log('📋 Parameters:', {
+      planId,
+      branchIdFilter,
+      commitFlag,
+      maxUnitsPerCustomerPerDay,
+    })
+
     if (!planId) {
+      console.error('❌ AUTO-ASSIGN ERROR: Missing plan_id')
+      console.error('📋 Request body received:', JSON.stringify(body, null, 2))
       return res
         .status(400)
         .json(new Response(400, 'Bad Request', 'Missing parameter: plan_id'))
     }
+
+    console.log('✅ Plan ID received:', planId)
 
     /* --------------------------------------------------------------------- */
     /* 1) Plan                                                               */
@@ -1257,7 +1269,7 @@ export const autoAssignLoads = async (req, res) => {
       `
       )
       .eq('id', planId)
-      .limit(1)
+    // .limit(1)
 
     if (planError) {
       console.error('autoAssignPlanByRoute: planError', planError)
@@ -1302,10 +1314,13 @@ export const autoAssignLoads = async (req, res) => {
 
     let candidateOrders = (unassignedRows || []).map(shapeOrderRow)
 
+    console.log('📦 Found unassigned orders:', candidateOrders.length)
+
     if (branchIdFilter && branchIdFilter !== 'all') {
       candidateOrders = candidateOrders.filter(
         (o) => String(o.branch_id || '') === String(branchIdFilter || '')
       )
+      console.log('🔍 After branch filter:', candidateOrders.length)
     }
 
     if (!candidateOrders.length) {
@@ -1407,6 +1422,8 @@ export const autoAssignLoads = async (req, res) => {
       (u) => !u.status || u.status === 'active'
     )
 
+    console.log('📋 Planned units (active):', plannedUnits.length)
+
     /* --------------------------------------------------------------------- */
     /* 5) Vehicle assignments, vehicles, drivers                             */
     /* --------------------------------------------------------------------- */
@@ -1450,6 +1467,20 @@ export const autoAssignLoads = async (req, res) => {
     }
 
     const vehicleAssignments = vaRows || []
+    console.log('🚗 Found vehicle assignments:', vehicleAssignments.length)
+
+    // Log vehicle assignments by branch
+    const vaByBranch = new Map()
+    vehicleAssignments.forEach((va) => {
+      const bKey = String(va.branch_id || '')
+      if (!vaByBranch.has(bKey)) vaByBranch.set(bKey, [])
+      vaByBranch.get(bKey).push(va)
+    })
+    console.log('\n🏭 VEHICLE ASSIGNMENTS BY BRANCH:')
+    for (const [bKey, vas] of vaByBranch.entries()) {
+      console.log(`🏭 Branch ${bKey}: ${vas.length} vehicle assignments`)
+    }
+
     const vaById = new Map()
     const availableAssignmentsByBranch = new Map()
     const driverIdSet = new Set()
@@ -1636,10 +1667,20 @@ export const autoAssignLoads = async (req, res) => {
     })
 
     // Remove used VAs from "available" pools
+    console.log('\n🔒 REMOVING USED VEHICLE ASSIGNMENTS FROM POOLS')
     for (const [bKey, arr] of availableAssignmentsByBranch.entries()) {
+      console.log(
+        `🔧 Branch ${bKey} before filtering: ${arr.length} assignments`
+      )
       const filtered = arr.filter((va) => !usedVAIds.has(va.id))
       availableAssignmentsByBranch.set(bKey, filtered)
+      console.log(
+        `🔧 Branch ${bKey} after filtering: ${filtered.length} available vehicle assignments`
+      )
     }
+
+    console.log('🚛 Total units created:', units.length)
+    console.log('🔒 Used vehicle assignment IDs:', usedVAIds.size)
 
     /* --------------------------------------------------------------------- */
     /* 7) Orders map (assigned + candidates)                                 */
@@ -1705,94 +1746,136 @@ export const autoAssignLoads = async (req, res) => {
     }
 
     /* --------------------------------------------------------------------- */
-    /* 8) Assign orders                                                      */
+    /* 8) Pre-create all needed units                                        */
+    /* --------------------------------------------------------------------- */
+    console.log('\n🎯 PRE-CREATING ALL NEEDED UNITS')
+
+    // Calculate how many units we need per branch
+    const unitsNeededPerBranch = new Map()
+    candidateOrders.forEach((order) => {
+      const branchKey = String(order.branch_id || '')
+      const weight = toNumber(order.total_weight, 0)
+
+      if (!unitsNeededPerBranch.has(branchKey)) {
+        unitsNeededPerBranch.set(branchKey, { totalWeight: 0, orderCount: 0 })
+      }
+
+      const branchData = unitsNeededPerBranch.get(branchKey)
+      branchData.totalWeight += weight
+      branchData.orderCount += 1
+    })
+
+    console.log('\n📊 UNITS NEEDED ANALYSIS:')
+    for (const [branchKey, data] of unitsNeededPerBranch.entries()) {
+      console.log(
+        `🏢 Branch ${branchKey}: ${data.orderCount} orders, ${data.totalWeight}kg total weight`
+      )
+    }
+
+    // Create additional units as needed
+    for (const [branchKey, data] of unitsNeededPerBranch.entries()) {
+      const availableList = availableAssignmentsByBranch.get(branchKey) || []
+      const usableList = availableList.filter(
+        (va) => va.vehicle_type !== 'horse' || va.trailer_id
+      )
+
+      console.log(
+        `\n🔧 Branch ${branchKey}: ${usableList.length} usable vehicle assignments available`
+      )
+
+      // Create units from all available assignments
+      while (usableList.length > 0) {
+        const va = usableList.shift()
+        usedVAIds.add(va.id)
+
+        const { data: newPuRow, error: insertPuError } = await database
+          .from('planned_units')
+          .insert({
+            plan_id: planId,
+            vehicle_assignment_id: va.id,
+            status: 'active',
+          })
+          .select('id, plan_id, vehicle_assignment_id, status, notes')
+          .single()
+
+        if (!insertPuError && newPuRow) {
+          const vehicle = vehiclesById.get(va.vehicle_id) || null
+          const trailer = va.trailer_id
+            ? vehiclesById.get(va.trailer_id) || null
+            : null
+          const driver = va.driver_id
+            ? driversById.get(va.driver_id) || null
+            : null
+
+          const capacityRaw =
+            va.vehicle_type === 'horse' && trailer
+              ? trailer.capacity
+              : vehicle && vehicle.capacity
+          const capacityKg = parseCapacityKg(capacityRaw)
+
+          const newUnit = {
+            planned_unit_id: newPuRow.id,
+            plan_id: planId,
+            vehicle_assignment_id: va.id,
+            branch_id: va.branch_id,
+            vehicle_type: va.vehicle_type,
+            vehicle_id: va.vehicle_id,
+            trailer_id: va.trailer_id,
+            driver_id: va.driver_id,
+            driver,
+            vehicle,
+            trailer,
+            capacity_kg: capacityKg,
+            used_weight_kg: 0,
+            remaining_capacity_kg: capacityKg,
+            routes_served: new Set(),
+            notes: newPuRow.notes || null,
+          }
+
+          units.push(newUnit)
+          console.log(`✅ Created unit ${newPuRow.id} for branch ${branchKey}`)
+        } else {
+          console.log(`❌ Failed to create unit:`, insertPuError)
+        }
+      }
+
+      // Update the available assignments map
+      availableAssignmentsByBranch.set(branchKey, usableList)
+    }
+
+    console.log(`\n🚛 Total units available for assignment: ${units.length}`)
+
+    /* --------------------------------------------------------------------- */
+    /* 9) Assign orders to units                                             */
     /* --------------------------------------------------------------------- */
     const assignments = []
     const newAssignedOrderIds = new Set()
 
+    console.log('\n🎯 STARTING ORDER ASSIGNMENT PROCESS')
+    console.log('📊 Orders to process:', candidateOrders.length)
+
     for (const order of candidateOrders) {
+      console.log(
+        `\n📦 Processing Order ${order.order_id}: ${order.customer_name} - ${order.total_weight}kg`
+      )
+
       const custKey = `${order.customer_id || ''}|${order.delivery_date || ''}`
       let custUnits = customerDayUnits.get(custKey) || new Set()
+      const weight = toNumber(order.total_weight, 0)
 
-      let { routeKey, routeSet, candidates, weight } =
-        findCandidateUnitsForOrder(order)
+      let { candidates } = findCandidateUnitsForOrder(order)
+      console.log(`🔍 Found ${candidates.length} candidate units`)
 
-      let candidateList = candidates
-
-      // If no existing units can take it, try to spin up a new unit
-      if (!candidateList.length) {
-        const branchKey = String(order.branch_id || '')
-        const rawAvailableList =
-          availableAssignmentsByBranch.get(branchKey) || []
-
-        // Only keep rigids OR horses that have a trailer
-        const availableList = rawAvailableList.filter(
-          (va) => va.vehicle_type !== 'horse' || va.trailer_id
-        )
-
-        if (availableList.length) {
-          const va = availableList.shift()
-          usedVAIds.add(va.id)
-
-          const { data: newPuRow, error: insertPuError } = await database
-            .from('planned_units')
-            .insert({
-              plan_id: planId,
-              vehicle_assignment_id: va.id,
-              status: 'active',
-            })
-            .select('id, plan_id, vehicle_assignment_id, status, notes')
-            .single()
-
-          if (!insertPuError && newPuRow) {
-            const vehicle = vehiclesById.get(va.vehicle_id) || null
-            const trailer = va.trailer_id
-              ? vehiclesById.get(va.trailer_id) || null
-              : null
-            const driver = va.driver_id
-              ? driversById.get(va.driver_id) || null
-              : null
-
-            const capacityRaw =
-              va.vehicle_type === 'horse' && trailer
-                ? trailer.capacity
-                : vehicle && vehicle.capacity
-            const capacityKg = parseCapacityKg(capacityRaw)
-
-            const newUnit = {
-              planned_unit_id: newPuRow.id,
-              plan_id: planId,
-              vehicle_assignment_id: va.id,
-              branch_id: va.branch_id,
-              vehicle_type: va.vehicle_type,
-              vehicle_id: va.vehicle_id,
-              trailer_id: va.trailer_id,
-              driver_id: va.driver_id,
-              driver,
-              vehicle,
-              trailer,
-              capacity_kg: capacityKg,
-              used_weight_kg: 0,
-              remaining_capacity_kg: capacityKg,
-              routes_served: new Set(),
-              notes: newPuRow.notes || null,
-            }
-
-            units.push(newUnit)
-
-            const recalc = findCandidateUnitsForOrder(order)
-            candidateList = recalc.candidates
-          }
-        }
+      if (!candidates.length) {
+        console.log(`❌ No candidate units for order ${order.order_id}`)
+        continue
       }
-
-      if (!candidateList.length) continue
 
       // Choose best-fit unit while enforcing per-customer-per-day cap
       let chosenUnit = null
       let bestResidual = Infinity
 
-      candidateList.forEach((u) => {
+      candidates.forEach((u) => {
         const residual = u.remaining_capacity_kg - weight
         if (residual < 0) return
 
@@ -1810,7 +1893,14 @@ export const autoAssignLoads = async (req, res) => {
         }
       })
 
-      if (!chosenUnit) continue
+      if (!chosenUnit) {
+        console.log(`❌ No suitable unit found for order ${order.order_id}`)
+        continue
+      }
+
+      console.log(
+        `✅ Assigned order ${order.order_id} to unit ${chosenUnit.planned_unit_id}`
+      )
 
       assignments.push({
         planned_unit_id: chosenUnit.planned_unit_id,
@@ -1839,8 +1929,40 @@ export const autoAssignLoads = async (req, res) => {
       custUnits = cSet
     }
 
+    console.log('\n🎯 ASSIGNMENT PROCESS COMPLETED')
+    console.log('📊 Total assignments made:', assignments.length)
+    console.log('🚛 Total units used:', units.length)
+
+    // Log assignments by customer
+    const assignmentsByCustomer = new Map()
+    assignments.forEach((assignment) => {
+      const order = ordersById.get(assignment.order_id)
+      if (order) {
+        const custKey = `${order.customer_id}|${order.delivery_date}`
+        const custName = order.customer_name || 'Unknown'
+        if (!assignmentsByCustomer.has(custKey)) {
+          assignmentsByCustomer.set(custKey, {
+            name: custName,
+            units: new Set(),
+            orders: [],
+          })
+        }
+        assignmentsByCustomer.get(custKey).units.add(assignment.planned_unit_id)
+        assignmentsByCustomer.get(custKey).orders.push(assignment.order_id)
+      }
+    })
+
+    console.log('\n📋 ASSIGNMENTS BY CUSTOMER:')
+    for (const [custKey, data] of assignmentsByCustomer.entries()) {
+      console.log(
+        `👤 ${data.name} (${custKey}): ${data.orders.length} orders assigned to ${data.units.size} units`
+      )
+    }
+
+    // Note: Final unit utilization will be logged after unitOrdersMap is built
+
     /* --------------------------------------------------------------------- */
-    /* 9) Commit to DB (optional)                                            */
+    /* 10) Commit to DB (optional)                                           */
     /* --------------------------------------------------------------------- */
     if (commitFlag && assignments.length > 0) {
       const ordersByUnitId = new Map()
@@ -1906,7 +2028,7 @@ export const autoAssignLoads = async (req, res) => {
     }
 
     /* --------------------------------------------------------------------- */
-    /* 10) Load order lines for ALL orders in scope                          */
+    /* 11) Load order lines for ALL orders in scope                          */
     /* --------------------------------------------------------------------- */
     const allOrderIds = Array.from(ordersById.keys())
     if (allOrderIds.length) {
@@ -1954,7 +2076,7 @@ export const autoAssignLoads = async (req, res) => {
     }
 
     /* --------------------------------------------------------------------- */
-    /* 11) Build response payload from in-memory state                       */
+    /* 12) Build response payload from in-memory state                       */
     /* --------------------------------------------------------------------- */
     const unitOrdersMap = new Map()
 
