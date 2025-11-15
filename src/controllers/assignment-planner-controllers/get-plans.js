@@ -1,6 +1,7 @@
 import { Response } from '../../utils/classes.js'
 import database from '../../config/supabase.js'
 import { asBool, toInt } from '../../utils/assignment-utils.js'
+import { buildPlanPayload } from '../../helpers/assignment-helpers.js'
 
 /* ============================== getPlans ============================== */
 
@@ -71,94 +72,33 @@ export const getAllPlans = async (req, res) => {
       )
     }
 
-    const planIds = planList.map((p) => p.id)
+    const augmented = await Promise.all(
+      planList.map(async (p) => {
+        const base = { ...p }
 
-    // attach plan_unit_ids and/or counts as needed
-    let unitsByPlan = new Map()
-    if (wantUnits || wantCounts) {
-      const { data: units, error: unitsErr } = await database
-        .from('planned_units')
-        .select('id, plan_id')
-        .in('plan_id', planIds)
+        if (wantUnits || wantCounts || wantUnassigned) {
+          const payload = await buildPlanPayload(p.id)
+          
+          if (wantUnits) {
+            base.plan_unit_ids = payload.units.map(u => u.planned_unit_id)
+          }
 
-      if (unitsErr) throw unitsErr
+          if (wantCounts) {
+            base.summary = {
+              units_count: payload.units.length,
+              orders_count: payload.assigned_orders.length,
+              total_weight: payload.units.reduce((sum, u) => sum + (u.summary?.total_weight || 0), 0),
+            }
+          }
 
-      unitsByPlan = new Map()
-      for (const u of units || []) {
-        if (!unitsByPlan.has(u.plan_id)) {
-          unitsByPlan.set(u.plan_id, [])
+          if (wantUnassigned) {
+            base.unassigned_count = payload.unassigned_orders.length
+          }
         }
-        unitsByPlan.get(u.plan_id).push(u.id)
-      }
-    }
 
-    let summaryByPlan = new Map()
-    if (wantCounts) {
-      const { data: rows, error: rowsErr } = await database
-        .from('v_plan_units_summary')
-        .select('plan_id, planned_unit_id, orders_assigned, total_weight')
-        .in('plan_id', planIds)
-
-      if (rowsErr) throw rowsErr
-
-      summaryByPlan = new Map()
-      for (const r of rows || []) {
-        if (!summaryByPlan.has(r.plan_id)) {
-          summaryByPlan.set(r.plan_id, {
-            units_count: 0,
-            orders_count: 0,
-            total_weight: 0,
-          })
-        }
-        const agg = summaryByPlan.get(r.plan_id)
-        agg.units_count += 1
-        agg.orders_count += Number(r.orders_assigned || 0)
-        agg.total_weight += Number(r.total_weight || 0)
-      }
-    }
-
-    let unassignedCounts = new Map()
-    if (wantUnassigned) {
-      const { data: rows, error: rowsErr } = await database
-        .from('v_unassigned_orders')
-        .select('plan_id, order_id')
-        .in('plan_id', planIds)
-
-      if (rowsErr) throw rowsErr
-
-      unassignedCounts = new Map()
-      for (const r of rows || []) {
-        unassignedCounts.set(
-          r.plan_id,
-          (unassignedCounts.get(r.plan_id) || 0) + 1
-        )
-      }
-    }
-
-    const augmented = planList.map((p) => {
-      const base = {
-        ...p,
-      }
-
-      if (wantUnits) {
-        base.plan_unit_ids = unitsByPlan.get(p.id) || []
-      }
-
-      if (wantCounts) {
-        const agg = summaryByPlan.get(p.id) || {
-          units_count: 0,
-          orders_count: 0,
-          total_weight: 0,
-        }
-        base.summary = agg
-      }
-
-      if (wantUnassigned) {
-        base.unassigned_count = unassignedCounts.get(p.id) || 0
-      }
-
-      return base
-    })
+        return base
+      })
+    )
 
     return res.status(200).json(
       new Response(200, 'OK', 'Plans fetched', {
