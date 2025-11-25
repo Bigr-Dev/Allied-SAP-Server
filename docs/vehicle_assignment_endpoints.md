@@ -1,5 +1,7 @@
 # Vehicle Assignment API — Endpoints (updated)
 
+**NOTE: This file is deprecated. See [docs/backend-api-overview.md](backend-api-overview.md) for the latest API documentation.**
+
 ## Auto Assign
 **POST** `/api/auto-assign`
 - Uses **RIGIDs** or **pre-linked HORSE↔TRAILER** only (trailer.assigned_to = horse.id).

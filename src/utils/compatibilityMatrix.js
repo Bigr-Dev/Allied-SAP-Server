@@ -1,3 +1,4 @@
+// NOTE: Candidate for cleanup: no direct static references found. Verify before removal.
 export const compatibilityMatrix = {
   '39O': {
     '39O': true,

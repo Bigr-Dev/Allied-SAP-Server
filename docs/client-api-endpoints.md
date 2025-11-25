@@ -1,0 +1,1961 @@
+# Client API Endpoints
+
+**NOTE: This file is deprecated. See [docs/backend-api-overview.md](backend-api-overview.md) for the latest API documentation.**
+
+This document describes all client-facing HTTP endpoints in the Allied SAP Server API.
+
+## Authentication
+
+### POST /api/login
+
+**Description:** Authenticate user with email/password or username/password (legacy)
+
+**Method:** POST  
+**Path:** `/api/login`  
+**Source:** `src/controllers/client-auth-controller.js`
+
+**Authentication:** Not required
+
+**Request body (JSON):**
+```json
+{
+  "email": "user@example.com",
+  "password": "string"
+}
+```
+OR (legacy):
+```json
+{
+  "username": "string",
+  "password": "string"
+}
+```
+
+**Success response (200):**
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "expires_at": 1640995200,
+  "token_type": "bearer",
+  "user": {
+    "id": "uuid",
+    "email": "user@example.com"
+  }
+}
+```
+
+**Error responses:**
+- 400 Bad Request: Missing credentials
+- 401 Unauthorized: Invalid credentials
+- 500 Internal Server Error: Unexpected error
+
+### POST /api/refresh
+
+**Description:** Refresh access token using refresh token
+
+**Method:** POST  
+**Path:** `/api/refresh`  
+**Source:** `src/controllers/client-auth-controller.js`
+
+**Authentication:** Not required
+
+**Request body (JSON):**
+```json
+{
+  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+**Success response (200):**
+```json
+{
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "expires_at": 1640995200,
+  "token_type": "bearer",
+  "user": {
+    "id": "uuid",
+    "email": "user@example.com"
+  }
+}
+```
+
+**Error responses:**
+- 400 Bad Request: Missing refresh_token
+- 401 Unauthorized: Invalid or expired refresh token
+- 500 Internal Server Error: Unexpected error
+
+### POST /api/logout
+
+**Description:** Logout user and revoke session
+
+**Method:** POST  
+**Path:** `/api/logout`  
+**Source:** `src/controllers/client-auth-controller.js`
+
+**Authentication:** Not required
+
+**Headers:**
+- `x-refresh-token` (optional): Refresh token if not in body
+
+**Request body (JSON):**
+```json
+{
+  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "global": false
+}
+```
+
+**Success response (200):**
+```json
+{
+  "success": true,
+  "scope": "local",
+  "message": "Signed out. This session was revoked."
+}
+```
+
+**Error responses:**
+- 400 Bad Request: Invalid or expired refresh_token
+- 500 Internal Server Error: Unexpected error
+
+## Branches
+
+### GET /api/branches
+
+**Description:** Get all branches with user and vehicle counts
+
+**Method:** GET  
+**Path:** `/api/branches`  
+**Source:** `src/controllers/branch-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "OK",
+  "data": [
+    {
+      "id": "uuid",
+      "name": "Main Branch",
+      "address": "123 Main St",
+      "phone": "+1234567890",
+      "email": "branch@company.com",
+      "user_count": 5,
+      "vehicle_count": 10,
+      "created_at": "2024-01-01T12:00:00.000Z",
+      "updated_at": "2024-01-01T12:00:00.000Z"
+    }
+  ],
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 500 Internal Server Error: Database error
+
+### GET /api/branches/:id
+
+**Description:** Get branch by ID
+
+**Method:** GET  
+**Path:** `/api/branches/:id`  
+**Source:** `src/controllers/branch-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): Branch UUID
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "OK",
+  "data": {
+    "id": "uuid",
+    "name": "Main Branch",
+    "address": "123 Main St",
+    "phone": "+1234567890",
+    "email": "branch@company.com",
+    "created_at": "2024-01-01T12:00:00.000Z",
+    "updated_at": "2024-01-01T12:00:00.000Z"
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: Branch not found
+- 500 Internal Server Error: Database error
+
+### POST /api/branches
+
+**Description:** Create new branch
+
+**Method:** POST  
+**Path:** `/api/branches`  
+**Source:** `src/controllers/branch-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Request body (JSON):**
+```json
+{
+  "name": "New Branch",
+  "address": "456 Oak Ave",
+  "phone": "+1987654321",
+  "email": "newbranch@company.com"
+}
+```
+
+**Success response (201):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 201,
+  "httpStatus": "Branch created",
+  "message": "Branch created",
+  "data": {
+    "id": "uuid"
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 500 Internal Server Error: Create failed
+
+### PUT /api/branches/:id
+
+**Description:** Update branch by ID
+
+**Method:** PUT  
+**Path:** `/api/branches/:id`  
+**Source:** `src/controllers/branch-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): Branch UUID
+
+**Request body (JSON):**
+```json
+{
+  "name": "Updated Branch Name",
+  "address": "789 Pine St",
+  "phone": "+1555666777",
+  "email": "updated@company.com"
+}
+```
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "Branch updated",
+  "message": "Branch updated",
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 500 Internal Server Error: Update failed
+
+### DELETE /api/branches/:id
+
+**Description:** Delete branch by ID (only if no linked records)
+
+**Method:** DELETE  
+**Path:** `/api/branches/:id`  
+**Source:** `src/controllers/branch-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): Branch UUID
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "Branch deleted",
+  "message": "Branch deleted",
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: Branch not found
+- 409 Conflict: Branch has linked records (users, vehicles, drivers)
+- 500 Internal Server Error: Delete failed
+
+## Users
+
+### GET /api/users
+
+**Description:** Get all users
+
+**Method:** GET  
+**Path:** `/api/users`  
+**Source:** `src/controllers/user-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "OK",
+  "data": [
+    {
+      "id": "uuid",
+      "email": "user@company.com",
+      "name": "John Doe",
+      "role": "admin",
+      "branch_id": "uuid",
+      "created_at": "2024-01-01T12:00:00.000Z",
+      "updated_at": "2024-01-01T12:00:00.000Z"
+    }
+  ],
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 500 Internal Server Error: Database error
+
+### GET /api/users/:id
+
+**Description:** Get user by ID
+
+**Method:** GET  
+**Path:** `/api/users/:id`  
+**Source:** `src/controllers/user-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): User UUID
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "OK",
+  "data": {
+    "id": "uuid",
+    "email": "user@company.com",
+    "name": "John Doe",
+    "role": "admin",
+    "branch_id": "uuid",
+    "created_at": "2024-01-01T12:00:00.000Z",
+    "updated_at": "2024-01-01T12:00:00.000Z"
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: User not found
+- 500 Internal Server Error: Database error
+
+### POST /api/users
+
+**Description:** Create new user
+
+**Method:** POST  
+**Path:** `/api/users`  
+**Source:** `src/controllers/user-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Request body (JSON):**
+```json
+{
+  "email": "newuser@company.com",
+  "name": "Jane Smith",
+  "role": "user",
+  "branch_id": "uuid",
+  "password": "securepassword"
+}
+```
+
+**Success response (201):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 201,
+  "httpStatus": "Created",
+  "message": "User created",
+  "data": {
+    "id": "uuid",
+    "email": "newuser@company.com",
+    "name": "Jane Smith"
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 400 Bad Request: Invalid input data
+- 500 Internal Server Error: Create failed
+
+### PUT /api/users/:id
+
+**Description:** Update user by ID
+
+**Method:** PUT  
+**Path:** `/api/users/:id`  
+**Source:** `src/controllers/user-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): User UUID
+
+**Request body (JSON):**
+```json
+{
+  "name": "Updated Name",
+  "role": "manager",
+  "branch_id": "uuid"
+}
+```
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "Updated",
+  "message": "User updated",
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: User not found
+- 500 Internal Server Error: Update failed
+
+### DELETE /api/users/:id
+
+**Description:** Delete user by ID
+
+**Method:** DELETE  
+**Path:** `/api/users/:id`  
+**Source:** `src/controllers/user-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): User UUID
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "Deleted",
+  "message": "User deleted",
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: User not found
+- 500 Internal Server Error: Delete failed
+
+## SAP Orders
+
+### GET /api/orders
+
+**Description:** Get sales orders with nested order lines
+
+**Method:** GET  
+**Path:** `/api/orders`  
+**Source:** `src/controllers/sap-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Orders retrieved",
+  "data": [
+    {
+      "id": "uuid",
+      "sales_order_number": "SO123456",
+      "customer_name": "ABC Company",
+      "delivery_date": "2024-01-15",
+      "status": "open",
+      "order_lines": [
+        {
+          "id": "line_id",
+          "description": "Product A",
+          "quantity": 10,
+          "weight": 100.5,
+          "length": "2.5m"
+        }
+      ]
+    }
+  ],
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 500 Internal Server Error: Database error
+
+## Routes
+
+### GET /api/routes
+
+**Description:** Get all delivery routes
+
+**Method:** GET  
+**Path:** `/api/routes`  
+**Source:** `src/controllers/routes-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Routes retrieved",
+  "data": [
+    {
+      "id": "uuid",
+      "name": "Route A",
+      "description": "Main city route",
+      "branch_id": "uuid",
+      "created_at": "2024-01-01T12:00:00.000Z"
+    }
+  ],
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 500 Internal Server Error: Database error
+
+### GET /api/routes/:id
+
+**Description:** Get route by ID
+
+**Method:** GET  
+**Path:** `/api/routes/:id`  
+**Source:** `src/controllers/routes-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): Route UUID
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Route found",
+  "data": {
+    "id": "uuid",
+    "name": "Route A",
+    "description": "Main city route",
+    "branch_id": "uuid",
+    "created_at": "2024-01-01T12:00:00.000Z"
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: Route not found
+- 500 Internal Server Error: Database error
+
+### POST /api/routes
+
+**Description:** Create new route
+
+**Method:** POST  
+**Path:** `/api/routes`  
+**Source:** `src/controllers/routes-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Request body (JSON):**
+```json
+{
+  "name": "New Route",
+  "description": "Industrial area route",
+  "branch_id": "uuid"
+}
+```
+
+**Success response (201):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 201,
+  "httpStatus": "Created",
+  "message": "Route created",
+  "data": {
+    "id": "uuid"
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 400 Bad Request: Invalid input data
+- 500 Internal Server Error: Create failed
+
+### PUT /api/routes/:id
+
+**Description:** Update route by ID
+
+**Method:** PUT  
+**Path:** `/api/routes/:id`  
+**Source:** `src/controllers/routes-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): Route UUID
+
+**Request body (JSON):**
+```json
+{
+  "name": "Updated Route Name",
+  "description": "Updated description"
+}
+```
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "Updated",
+  "message": "Route updated",
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: Route not found
+- 500 Internal Server Error: Update failed
+
+### DELETE /api/routes/:id
+
+**Description:** Delete route by ID
+
+**Method:** DELETE  
+**Path:** `/api/routes/:id`  
+**Source:** `src/controllers/routes-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): Route UUID
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "Deleted",
+  "message": "Route deleted",
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: Route not found
+- 500 Internal Server Error: Delete failed
+
+## Customers
+
+### GET /api/customers
+
+**Description:** Get all customers
+
+**Method:** GET  
+**Path:** `/api/customers`  
+**Source:** `src/controllers/customer-controller.js`
+
+**Authentication:** Not required
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Customer list",
+  "data": [
+    {
+      "id": "uuid",
+      "name": "ABC Company",
+      "bp_code": "BP001",
+      "address": "123 Business St",
+      "phone": "+1234567890",
+      "email": "contact@abc.com"
+    }
+  ],
+  "success": true
+}
+```
+
+**Error responses:**
+- 500 Internal Server Error: Database error
+
+### GET /api/customers/:id
+
+**Description:** Get customer by ID
+
+**Method:** GET  
+**Path:** `/api/customers/:id`  
+**Source:** `src/controllers/customer-controller.js`
+
+**Authentication:** Not required
+
+**Path parameters:**
+- `id` (string): Customer UUID
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Customer found",
+  "data": {
+    "id": "uuid",
+    "name": "ABC Company",
+    "bp_code": "BP001",
+    "address": "123 Business St",
+    "phone": "+1234567890",
+    "email": "contact@abc.com"
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 404 Not Found: Customer not found
+- 500 Internal Server Error: Database error
+
+### POST /api/customers
+
+**Description:** Create new customer
+
+**Method:** POST  
+**Path:** `/api/customers`  
+**Source:** `src/controllers/customer-controller.js`
+
+**Authentication:** Not required
+
+**Request body (JSON):**
+```json
+{
+  "name": "New Company",
+  "bp_code": "BP002",
+  "address": "456 Commerce Ave",
+  "phone": "+1987654321",
+  "email": "info@newcompany.com",
+  "row_number": 1
+}
+```
+
+**Success response (201):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 201,
+  "httpStatus": "Created",
+  "message": "Customer added",
+  "success": true
+}
+```
+
+**Error responses:**
+- 409 Conflict: Customer with BP code already exists
+- 500 Internal Server Error: Create failed
+
+### PUT /api/customers/:id
+
+**Description:** Update customer by ID
+
+**Method:** PUT  
+**Path:** `/api/customers/:id`  
+**Source:** `src/controllers/customer-controller.js`
+
+**Authentication:** Not required
+
+**Path parameters:**
+- `id` (string): Customer UUID
+
+**Request body (JSON):**
+```json
+{
+  "name": "Updated Company Name",
+  "address": "789 New Address St",
+  "phone": "+1555666777"
+}
+```
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "Updated",
+  "message": "Customer updated",
+  "data": {
+    "id": "uuid",
+    "name": "Updated Company Name"
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 404 Not Found: Customer not found
+- 500 Internal Server Error: Update failed
+
+### DELETE /api/customers/:id
+
+**Description:** Delete customer by ID
+
+**Method:** DELETE  
+**Path:** `/api/customers/:id`  
+**Source:** `src/controllers/customer-controller.js`
+
+**Authentication:** Not required
+
+**Path parameters:**
+- `id` (string): Customer UUID
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "Deleted",
+  "message": "Customer removed",
+  "data": {
+    "id": "uuid"
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 404 Not Found: Customer not found
+- 500 Internal Server Error: Delete failed
+
+## Drivers
+
+### GET /api/drivers
+
+**Description:** Get all drivers with branch information
+
+**Method:** GET  
+**Path:** `/api/drivers`  
+**Source:** `src/controllers/drivers-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Success response (200):**
+```json
+[
+  {
+    "id": "uuid",
+    "branch_id": "uuid",
+    "branch_name": "Main Branch",
+    "name": "John",
+    "last_name": "Driver",
+    "phone": "+1234567890",
+    "email": "john@company.com",
+    "license": "DL123456",
+    "license_code": "C1",
+    "status": "active",
+    "created_at": "2024-01-01T12:00:00.000Z"
+  }
+]
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 500 Internal Server Error: Database error
+
+### GET /api/drivers/:id
+
+**Description:** Get driver by ID
+
+**Method:** GET  
+**Path:** `/api/drivers/:id`  
+**Source:** `src/controllers/drivers-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): Driver UUID
+
+**Success response (200):**
+```json
+{
+  "id": "uuid",
+  "branch_id": "uuid",
+  "branch_name": "Main Branch",
+  "name": "John",
+  "last_name": "Driver",
+  "phone": "+1234567890",
+  "email": "john@company.com",
+  "license": "DL123456",
+  "license_code": "C1",
+  "status": "active",
+  "created_at": "2024-01-01T12:00:00.000Z"
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: Driver not found
+- 500 Internal Server Error: Database error
+
+### POST /api/drivers
+
+**Description:** Create new driver
+
+**Method:** POST  
+**Path:** `/api/drivers`  
+**Source:** `src/controllers/drivers-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Request body (JSON):**
+```json
+{
+  "branch_id": "uuid",
+  "name": "Jane",
+  "last_name": "Driver",
+  "phone": "+1987654321",
+  "email": "jane@company.com",
+  "license": "DL789012",
+  "license_code": "C1",
+  "status": "active"
+}
+```
+
+**Success response (201):**
+```json
+{
+  "id": "uuid",
+  "branch_id": "uuid",
+  "name": "Jane",
+  "last_name": "Driver",
+  "status": "active",
+  "created_at": "2024-01-01T12:00:00.000Z"
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 400 Bad Request: Invalid input data
+- 500 Internal Server Error: Create failed
+
+### PUT /api/drivers/:id
+
+**Description:** Update driver by ID
+
+**Method:** PUT  
+**Path:** `/api/drivers/:id`  
+**Source:** `src/controllers/drivers-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): Driver UUID
+
+**Request body (JSON):**
+```json
+{
+  "phone": "+1555666777",
+  "status": "inactive",
+  "license_expiry": "2025-12-31"
+}
+```
+
+**Success response (200):**
+```json
+{
+  "id": "uuid",
+  "phone": "+1555666777",
+  "status": "inactive",
+  "updated_at": "2024-01-01T12:00:00.000Z"
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: Driver not found
+- 500 Internal Server Error: Update failed
+
+### DELETE /api/drivers/:id
+
+**Description:** Delete driver by ID
+
+**Method:** DELETE  
+**Path:** `/api/drivers/:id`  
+**Source:** `src/controllers/drivers-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): Driver UUID
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "Driver deleted",
+  "message": "Driver deleted",
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: Driver not found
+- 500 Internal Server Error: Delete failed
+
+## Vehicles
+
+### GET /api/vehicles
+
+**Description:** Get all vehicles with branch information
+
+**Method:** GET  
+**Path:** `/api/vehicles`  
+**Source:** `src/controllers/vehicles-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Success response (200):**
+```json
+[
+  {
+    "id": "uuid",
+    "type": "rigid",
+    "reg_number": "ABC123",
+    "license_plate": "XYZ789",
+    "model": "Truck Model",
+    "capacity": "10000kg",
+    "status": "active",
+    "branch_id": "uuid",
+    "branch_name": "Main Branch",
+    "fleet_number": "FL001",
+    "created_at": "2024-01-01T12:00:00.000Z"
+  }
+]
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 500 Internal Server Error: Database error
+
+### GET /api/vehicles/:id
+
+**Description:** Get vehicle by ID
+
+**Method:** GET  
+**Path:** `/api/vehicles/:id`  
+**Source:** `src/controllers/vehicles-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): Vehicle UUID
+
+**Success response (200):**
+```json
+{
+  "id": "uuid",
+  "type": "rigid",
+  "reg_number": "ABC123",
+  "license_plate": "XYZ789",
+  "model": "Truck Model",
+  "capacity": "10000kg",
+  "status": "active",
+  "branch_id": "uuid",
+  "branch_name": "Main Branch",
+  "fleet_number": "FL001",
+  "created_at": "2024-01-01T12:00:00.000Z"
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: Vehicle not found
+- 500 Internal Server Error: Database error
+
+### POST /api/vehicles
+
+**Description:** Create new vehicle
+
+**Method:** POST  
+**Path:** `/api/vehicles`  
+**Source:** `src/controllers/vehicles-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Request body (JSON):**
+```json
+{
+  "type": "rigid",
+  "reg_number": "DEF456",
+  "license_plate": "UVW012",
+  "model": "New Truck Model",
+  "capacity": "15000kg",
+  "status": "active",
+  "branch_id": "uuid",
+  "fleet_number": "FL002"
+}
+```
+
+**Success response (201):**
+```json
+{
+  "id": "uuid",
+  "type": "rigid",
+  "reg_number": "DEF456",
+  "status": "active",
+  "created_at": "2024-01-01T12:00:00.000Z"
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 400 Bad Request: Invalid input data
+- 500 Internal Server Error: Create failed
+
+### PUT /api/vehicles/:id
+
+**Description:** Update vehicle by ID
+
+**Method:** PUT  
+**Path:** `/api/vehicles/:id`  
+**Source:** `src/controllers/vehicles-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): Vehicle UUID
+
+**Request body (JSON):**
+```json
+{
+  "status": "maintenance",
+  "capacity": "12000kg",
+  "odometer": 150000
+}
+```
+
+**Success response (200):**
+```json
+{
+  "id": "uuid",
+  "status": "maintenance",
+  "capacity": "12000kg",
+  "updated_at": "2024-01-01T12:00:00.000Z"
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: Vehicle not found
+- 500 Internal Server Error: Update failed
+
+### DELETE /api/vehicles/:id
+
+**Description:** Delete vehicle by ID
+
+**Method:** DELETE  
+**Path:** `/api/vehicles/:id`  
+**Source:** `src/controllers/vehicles-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `id` (string): Vehicle UUID
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "Vehicle deleted",
+  "message": "Vehicle deleted",
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: Vehicle not found
+- 500 Internal Server Error: Delete failed
+
+## Loads
+
+### GET /api/loads
+
+**Description:** Get loads organized by branch, route, suburb, and customer
+
+**Method:** GET  
+**Path:** `/api/loads`  
+**Source:** `src/controllers/loads-controller.js`
+
+**Authentication:** Required (Bearer token)
+
+**Query parameters:**
+- `date` (string, optional): Filter by delivery date (YYYY-MM-DD)
+- `from` (string, optional): Start date range (YYYY-MM-DD)
+- `to` (string, optional): End date range (YYYY-MM-DD)
+- `branch_id` (string, optional): Filter by branch ID
+- `route_id` (string, optional): Filter by route ID
+- `customer_name` (string, optional): Filter by customer name
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Loads fetched",
+  "data": {
+    "branches": [
+      {
+        "branch_id": "uuid",
+        "branch_name": "Main Branch",
+        "routes": [
+          {
+            "route_id": "uuid",
+            "route_name": "Route A",
+            "suburbs": [
+              {
+                "suburb_route_id": "uuid",
+                "suburb_name": "Downtown",
+                "address": "City Center",
+                "customers": [
+                  {
+                    "customer_id": "uuid",
+                    "customer_name": "ABC Company",
+                    "orders": [
+                      {
+                        "order_id": "uuid",
+                        "sales_order_number": "SO123456",
+                        "delivery_date": "2024-01-15",
+                        "totals": {
+                          "items": 5,
+                          "quantity": 100,
+                          "weight": 500.5
+                        },
+                        "status": "open",
+                        "assignment_plan_id": null,
+                        "assigned_unit_id": null,
+                        "is_split": false,
+                        "order_lines": [
+                          {
+                            "order_line_id": "line_id",
+                            "description": "Product A",
+                            "quantity": 20,
+                            "weight": 100.1,
+                            "assignment": "unassigned"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 500 Internal Server Error: Database error
+
+## Assignment Planner
+
+### GET /api/plans
+
+**Description:** Get all assignment plans with optional detailed information
+
+**Method:** GET  
+**Path:** `/api/plans`  
+**Source:** `src/controllers/assignment-planner-controllers/get-plans.js`
+
+**Authentication:** Required (Bearer token)
+
+**Query parameters:**
+- `limit` (number, optional): Number of plans to return (default: 50)
+- `offset` (number, optional): Number of plans to skip (default: 0)
+- `order` (string, optional): Sort order 'asc' or 'desc' (default: 'desc')
+- `date_from` (string, optional): Filter by delivery start date (YYYY-MM-DD)
+- `date_to` (string, optional): Filter by delivery end date (YYYY-MM-DD)
+- `include_units` (string, optional): Include unit IDs ('true'/'false')
+- `include_counts` (string, optional): Include summary counts ('true'/'false')
+- `include_unassigned` (string, optional): Include unassigned order count ('true'/'false')
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Plans fetched",
+  "data": {
+    "total": 10,
+    "limit": 50,
+    "offset": 0,
+    "plans": [
+      {
+        "id": "uuid",
+        "plan_name": "Weekly Plan Jan 15-21",
+        "delivery_start": "2024-01-15",
+        "delivery_end": "2024-01-21",
+        "scope_all_branches": true,
+        "status": "planning",
+        "notes": "Initial planning phase",
+        "created_at": "2024-01-01T12:00:00.000Z",
+        "updated_at": "2024-01-01T12:00:00.000Z",
+        "plan_unit_ids": ["unit1", "unit2"],
+        "summary": {
+          "units_count": 5,
+          "orders_count": 25,
+          "total_weight": 2500.5
+        },
+        "unassigned_count": 3
+      }
+    ]
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 500 Internal Server Error: Database error
+
+### GET /api/plans/:plan_id
+
+**Description:** Get detailed plan information including units, orders, and assignments
+
+**Method:** GET  
+**Path:** `/api/plans/:plan_id`  
+**Source:** `src/controllers/assignment-planner-controllers/get-plan.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `plan_id` (string): Plan UUID
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Plan fetched",
+  "data": {
+    "plan": {
+      "id": "uuid",
+      "plan_name": "Weekly Plan Jan 15-21",
+      "delivery_start": "2024-01-15",
+      "delivery_end": "2024-01-21",
+      "scope_all_branches": true,
+      "status": "planning",
+      "notes": "Initial planning phase"
+    },
+    "units": [
+      {
+        "planned_unit_id": "uuid",
+        "plan_id": "uuid",
+        "vehicle_assignment_id": "uuid",
+        "vehicle_id": "uuid",
+        "vehicle_type": "rigid",
+        "driver_id": "uuid",
+        "branch_id": "uuid",
+        "vehicle": {
+          "id": "uuid",
+          "reg_number": "ABC123",
+          "capacity": "10000kg"
+        },
+        "driver": {
+          "id": "uuid",
+          "name": "John Driver"
+        },
+        "status": "active",
+        "notes": null,
+        "summary": {
+          "orders_assigned": 3,
+          "total_weight": 750.5
+        },
+        "orders": [
+          {
+            "order_id": "uuid",
+            "sales_order_number": "SO123456",
+            "delivery_date": "2024-01-15",
+            "customer_name": "ABC Company",
+            "lines": []
+          }
+        ]
+      }
+    ],
+    "unassigned_orders": [],
+    "unassigned_units": [],
+    "assigned_orders": [],
+    "unused_units": []
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 400 Bad Request: Missing plan_id
+- 404 Not Found: Plan not found
+- 500 Internal Server Error: Database error
+
+### POST /api/plans/add-plan
+
+**Description:** Create new assignment plan
+
+**Method:** POST  
+**Path:** `/api/plans/add-plan`  
+**Source:** `src/controllers/assignment-planner-controllers/add-plan.js`
+
+**Authentication:** Required (Bearer token)
+
+**Request body (JSON):**
+```json
+{
+  "plan_name": "New Weekly Plan",
+  "delivery_start": "2024-01-22",
+  "delivery_end": "2024-01-28",
+  "scope_all_branches": true,
+  "notes": "Planning for next week",
+  "status": "planning"
+}
+```
+
+**Success response (201):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 201,
+  "httpStatus": "Created",
+  "message": "Plan created",
+  "data": {
+    "plan": {
+      "id": "uuid",
+      "plan_name": "New Weekly Plan",
+      "delivery_start": "2024-01-22",
+      "delivery_end": "2024-01-28"
+    },
+    "units": [],
+    "unassigned_orders": [],
+    "unassigned_units": [],
+    "assigned_orders": []
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 400 Bad Request: Missing required fields or invalid date range
+- 500 Internal Server Error: Create failed
+
+### POST /api/plans/:plan_id/units
+
+**Description:** Add idle unit to plan
+
+**Method:** POST  
+**Path:** `/api/plans/:plan_id/units`  
+**Source:** `src/controllers/assignment-planner-controllers/add-idle-unit.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `plan_id` (string): Plan UUID
+
+**Request body (JSON):**
+```json
+{
+  "vehicle_assignment_id": "uuid"
+}
+```
+
+**Success response (201):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 201,
+  "httpStatus": "Created",
+  "message": "Unit added to plan",
+  "data": {
+    "plan": {},
+    "units": [],
+    "unassigned_orders": []
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 400 Bad Request: Missing vehicle_assignment_id
+- 404 Not Found: Plan or vehicle assignment not found
+- 500 Internal Server Error: Add failed
+
+### POST /api/plans/:planId/bulk-assign
+
+**Description:** Bulk assign orders to units in a plan
+
+**Method:** POST  
+**Path:** `/api/plans/:planId/bulk-assign`  
+**Source:** `src/controllers/assignment-planner-controllers/bulk-assign.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `planId` (string): Plan UUID
+
+**Request body (JSON):**
+```json
+{
+  "plan_id": "uuid",
+  "assignments": [
+    {
+      "planned_unit_id": "uuid",
+      "orders": [
+        {
+          "order_id": "uuid",
+          "stop_sequence": 1
+        },
+        {
+          "order_id": "uuid",
+          "stop_sequence": 2
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Orders assigned",
+  "data": {
+    "plan": {},
+    "units": [],
+    "unassigned_orders": [],
+    "assigned_orders": []
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 400 Bad Request: Invalid assignment data
+- 404 Not Found: Plan not found
+- 500 Internal Server Error: Assignment failed
+
+### POST /api/plans/:planId/unassign
+
+**Description:** Unassign orders from units
+
+**Method:** POST  
+**Path:** `/api/plans/:planId/unassign`  
+**Source:** `src/controllers/assignment-planner-controllers/unassign-unit.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `planId` (string): Plan UUID
+
+**Request body (JSON):**
+```json
+{
+  "order_ids": ["uuid1", "uuid2"]
+}
+```
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Orders unassigned",
+  "data": {
+    "plan": {},
+    "units": [],
+    "unassigned_orders": []
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 400 Bad Request: Missing order_ids
+- 500 Internal Server Error: Unassign failed
+
+### DELETE /api/plans/:planId
+
+**Description:** Delete assignment plan
+
+**Method:** DELETE  
+**Path:** `/api/plans/:planId`  
+**Source:** `src/controllers/assignment-planner-controllers/delete-plan.js`
+
+**Authentication:** Required (Bearer token)
+
+**Path parameters:**
+- `planId` (string): Plan UUID
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Plan deleted",
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 404 Not Found: Plan not found
+- 500 Internal Server Error: Delete failed
+
+### POST /api/plans/units/note
+
+**Description:** Set note for planned unit
+
+**Method:** POST  
+**Path:** `/api/plans/units/note`  
+**Source:** `src/controllers/assignment-planner-controllers/set-unit-note.js`
+
+**Authentication:** Required (Bearer token)
+
+**Request body (JSON):**
+```json
+{
+  "planned_unit_id": "uuid",
+  "notes": "Unit requires maintenance check"
+}
+```
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Unit note updated",
+  "data": {
+    "plan": {},
+    "units": []
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 400 Bad Request: Missing planned_unit_id
+- 404 Not Found: Planned unit not found
+- 500 Internal Server Error: Update failed
+
+### POST /api/plans/units/remove
+
+**Description:** Remove planned unit from plan
+
+**Method:** POST  
+**Path:** `/api/plans/units/remove`  
+**Source:** `src/controllers/assignment-planner-controllers/remove-planned-unit.js`
+
+**Authentication:** Required (Bearer token)
+
+**Request body (JSON):**
+```json
+{
+  "planned_unit_id": "uuid"
+}
+```
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Unit removed from plan",
+  "data": {
+    "plan": {},
+    "units": []
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 400 Bad Request: Missing planned_unit_id
+- 404 Not Found: Planned unit not found
+- 500 Internal Server Error: Remove failed
+
+### POST /api/plans/auto-assign
+
+**Description:** Auto-assign orders to units using optimization algorithm
+
+**Method:** POST  
+**Path:** `/api/plans/auto-assign`  
+**Source:** `src/controllers/assignment-planner-controllers/auto-assign-plan.js`
+
+**Authentication:** Required (Bearer token)
+
+**Request body (JSON):**
+```json
+{
+  "plan_id": "uuid",
+  "optimization_settings": {
+    "prioritize_weight": true,
+    "max_stops_per_unit": 10
+  }
+}
+```
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Auto-assignment completed",
+  "data": {
+    "plan": {},
+    "units": [],
+    "assignments_made": 15,
+    "optimization_stats": {}
+  },
+  "success": true
+}
+```
+
+**Error responses:**
+- 401 Unauthorized: Invalid or missing token
+- 400 Bad Request: Missing plan_id
+- 404 Not Found: Plan not found
+- 500 Internal Server Error: Auto-assignment failed
+
+## SAP Integration
+
+### POST /sap/login
+
+**Description:** Authenticate SAP system for data integration
+
+**Method:** POST  
+**Path:** `/sap/login`  
+**Source:** `src/controllers/auth-controller.js`
+
+**Authentication:** Not required
+
+**Request body (JSON):**
+```json
+{
+  "username": "sap_user",
+  "password": "sap_password"
+}
+```
+
+**Success response (200):**
+```json
+{
+  "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+}
+```
+
+**Error responses:**
+- 400 Bad Request: Missing credentials
+- 401 Unauthorized: Invalid user or password
+- 500 Internal Server Error: Authentication failed
+
+### POST /sap/orders
+
+**Description:** Upsert sales order from SAP system
+
+**Method:** POST  
+**Path:** `/sap/orders`  
+**Source:** `src/controllers/sap-controller.js`
+
+**Authentication:** Required (SAP JWT token)
+
+**Headers:**
+- `Authorization`: Bearer {sap_jwt_token}
+
+**Request body (JSON):**
+```json
+{
+  "SalesOrderNumber": "SO123456",
+  "DocStatus": "O",
+  "SendToDispatch": "Y",
+  "sendToPlanning": "Y",
+  "CustomerName": "ABC Company",
+  "DeliveryDate": "2024-01-15",
+  "OrderLines": [
+    {
+      "id": "line_id_1",
+      "description": "Product A",
+      "quantity": 10,
+      "weight": 100.5,
+      "length": "2.5m",
+      "urProd": "A",
+      "sendToProduction": "Y"
+    }
+  ]
+}
+```
+
+**Success response (200):**
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Order SO123456 saved",
+  "success": true
+}
+```
+
+**Error responses:**
+- 400 Bad Request: Missing SalesOrderNumber
+- 401 Unauthorized: Invalid or missing SAP token
+- 500 Internal Server Error: Upsert failed
+
+## Standard Response Format
+
+All API responses follow a consistent format using the Response class:
+
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 200,
+  "httpStatus": "OK",
+  "message": "Success message",
+  "data": {},
+  "success": true
+}
+```
+
+**Response Fields:**
+- `timeStamp`: ISO timestamp of response
+- `statusCode`: HTTP status code
+- `httpStatus`: HTTP status text
+- `message`: Descriptive message
+- `data`: Response payload (varies by endpoint)
+- `success`: Boolean indicating success (true for 2xx status codes)
+
+## Authentication Details
+
+**Client Authentication:**
+- Uses Supabase JWT tokens
+- Header format: `Authorization: Bearer {access_token}`
+- Tokens obtained via `/api/login` endpoint
+- Refresh tokens via `/api/refresh` endpoint
+
+**SAP Authentication:**
+- Uses custom JWT tokens
+- Header format: `Authorization: Bearer {sap_jwt_token}`
+- Tokens obtained via `/sap/login` endpoint
+- Used for SAP system integration endpoints
+
+## Error Handling
+
+All endpoints return consistent error responses:
+
+```json
+{
+  "timeStamp": "2024-01-01T12:00:00.000Z",
+  "statusCode": 400,
+  "httpStatus": "Bad Request",
+  "message": "Error description",
+  "success": false
+}
+```
+
+Common HTTP status codes:
+- 200: Success
+- 201: Created
+- 400: Bad Request (validation errors)
+- 401: Unauthorized (authentication required)
+- 403: Forbidden (insufficient permissions)
+- 404: Not Found (resource doesn't exist)
+- 409: Conflict (duplicate resource)
+- 422: Unprocessable Entity (validation failed)
+- 500: Internal Server Error (unexpected server error)

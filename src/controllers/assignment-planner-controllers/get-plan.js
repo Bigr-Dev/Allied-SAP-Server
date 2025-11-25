@@ -1,5 +1,5 @@
 import { Response } from '../../utils/classes.js'
-import { buildPlanPayload } from '../../helpers/assignment-helpers.js'
+import * as planningService from '../../domain/planning/index.js'
 
 /* ============================== getPlan ============================== */
 
@@ -46,7 +46,7 @@ export const getPlan = async (req, res) => {
         )
     }
 
-    const payload = await buildPlanPayload(planId)
+    const payload = await planningService.getPlanById(planId)
     return res
       .status(200)
       .json(new Response(200, 'OK', 'Plan fetched', payload))

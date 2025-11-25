@@ -1,5 +1,7 @@
 # Assignment Planner & Loads API Documentation
 
+**NOTE: This file is deprecated. See [docs/backend-api-overview.md](backend-api-overview.md) for the latest API documentation.**
+
 ## Overview
 
 The Assignment Planner system manages the allocation of delivery orders (loads) to vehicle units within delivery plans. It provides intelligent auto-assignment capabilities based on routes, capacity, and business rules, as well as manual assignment controls.
